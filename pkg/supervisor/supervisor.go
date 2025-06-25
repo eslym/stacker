@@ -840,7 +840,9 @@ func (s *Supervisor) GetServiceStatus(name string) (*ServiceInfo, error) {
 		return nil, fmt.Errorf("service %s not found", name)
 	}
 
-	return info, nil
+	// Create a copy of the ServiceInfo to prevent race conditions
+	infoCopy := *info
+	return &infoCopy, nil
 }
 
 // GetAllServiceStatuses returns the status of all services
@@ -850,7 +852,9 @@ func (s *Supervisor) GetAllServiceStatuses() map[string]*ServiceInfo {
 
 	result := make(map[string]*ServiceInfo)
 	for name, info := range s.services {
-		result[name] = info
+		// Create a copy of the ServiceInfo to prevent race conditions
+		infoCopy := *info
+		result[name] = &infoCopy
 	}
 
 	return result
