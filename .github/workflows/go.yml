@@ -27,13 +27,3 @@ jobs:
 
     - name: Run tests with race detector
       run: go test -timeout 30s -race -v ./...
-
-    - name: Run tests with coverage
-      run: go test -timeout 30s -coverprofile=coverage.out ./...
-
-    - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v3
-      with:
-        file: ./coverage.out
-        flags: unittests
-        fail_ci_if_error: true
