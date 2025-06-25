@@ -10,9 +10,15 @@
 # Define the distro argument with debian as default
 ARG DISTRO=debian
 
+# Define the base images for building the Go application
+# debian-builder: Uses Debian which is based on glibc
+# alpine-builder: Uses Alpine which is based on musl libc
+FROM golang:1.20 AS builder-debian
+FROM golang:1.20-alpine AS builder-alpine
+
 # Build stage - uses the specified distro for the build environment
 # This ensures that the Go application is built with the appropriate libc
-FROM golang:1.20-${DISTRO} AS builder
+FROM builder-${DISTRO} AS builder
 
 WORKDIR /app
 
