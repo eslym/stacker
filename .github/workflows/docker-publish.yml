@@ -1,0 +1,69 @@
+name: Docker Build and Publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  docker:
+    name: Build and Push Docker Images
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v4
+        with:
+          images: eslym/stacker
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            latest
+
+      # Extract version for Alpine tagging
+      - name: Extract version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      # Build and push Debian image for both x64 and arm64
+      - name: Build and push Debian image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            DISTRO=debian
+          push: true
+          tags: eslym/stacker:debian,${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      # Build and push Alpine image for both x64 and arm64
+      - name: Build and push Alpine image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            DISTRO=alpine
+          push: true
+          tags: |
+            eslym/stacker:alpine
+            eslym/stacker:alpine-${{ steps.version.outputs.VERSION }}
+          labels: ${{ steps.meta.outputs.labels }}
