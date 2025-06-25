@@ -34,7 +34,7 @@ ARG DISTRO=debian
 # Define the runtime images for each supported distribution
 # debian-runtime: Uses Debian slim which is based on glibc
 # alpine-runtime: Uses Alpine which is based on musl libc
-FROM debian:slim AS debian-runtime
+FROM debian:stable-slim AS debian-runtime
 FROM alpine:latest AS alpine-runtime
 
 # Select the appropriate runtime image based on the DISTRO argument
