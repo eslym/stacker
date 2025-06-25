@@ -7,7 +7,7 @@
 Stacker is a robust process supervisor designed for containerized environments. It efficiently manages the lifecycle of multiple services, providing advanced monitoring, automatic restart capabilities, and a comprehensive admin interface.
 
 > [!NOTE]
-> This application is fully written by AI (JetBrains Junue).
+> This application is fully written by AI (JetBrains Junie).
 
 ## 📋 Features
 
