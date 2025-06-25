@@ -46,6 +46,8 @@ type ServiceInfo struct {
 	CpuPercent  float64
 	MemoryUsage int64
 	LastUpdated time.Time
+	// Flag to indicate if the service was explicitly stopped
+	ExplicitlyStopped bool
 }
 
 // LoggerProvider is an interface for providing loggers for services
@@ -323,6 +325,8 @@ func (s *Supervisor) startService(name string) error {
 				cmdArgs = append(cmdArgs, strArg)
 			}
 		}
+	case []string:
+		cmdArgs = append(cmdArgs, cmd...)
 	}
 
 	if len(cmdArgs) == 0 {
@@ -373,6 +377,7 @@ func (s *Supervisor) startService(name string) error {
 	info.Status = StatusRunning
 	info.StartTime = time.Now()
 	info.Error = ""
+	info.ExplicitlyStopped = false
 
 	if s.verbose {
 		log.Printf("Service %s started successfully with PID %d", name, info.Pid)
@@ -402,6 +407,9 @@ func (s *Supervisor) startService(name string) error {
 			info.Status = StatusFailed
 		}
 
+		// No need to store the current status and ExplicitlyStopped flag
+		// We'll check the ExplicitlyStopped flag directly when restarting
+
 		// Handle restart policy
 		if s.shouldRestart(info) {
 			delay := s.calculateRestartDelay(info)
@@ -409,10 +417,25 @@ func (s *Supervisor) startService(name string) error {
 			info.NextRestart = time.Now().Add(delay)
 
 			time.AfterFunc(delay, func() {
+				// Check if the service was explicitly stopped after we scheduled the restart
+				s.mu.RLock()
+				serviceInfo, exists := s.services[name]
+				explicitlyStopped := exists && serviceInfo.ExplicitlyStopped
+				s.mu.RUnlock()
+
+				if explicitlyStopped {
+					log.Printf("Service %s was explicitly stopped, not restarting", name)
+					return
+				}
+
 				if err := s.startService(name); err != nil {
 					log.Printf("Failed to restart service %s: %v", name, err)
 				} else {
-					info.RestartCount++
+					s.mu.Lock()
+					if serviceInfo, exists := s.services[name]; exists {
+						serviceInfo.RestartCount++
+					}
+					s.mu.Unlock()
 				}
 			})
 		}
@@ -452,6 +475,12 @@ func (s *Supervisor) stopService(name string) error {
 		}
 		return nil
 	}
+
+	// Set the ExplicitlyStopped flag before signaling the process to stop
+	// This will prevent the goroutine in startService from restarting the service
+	s.mu.Lock()
+	info.ExplicitlyStopped = true
+	s.mu.Unlock()
 
 	// Get grace period from config
 	var graceDuration time.Duration
@@ -601,6 +630,8 @@ func (s *Supervisor) scheduleCronJob(name string) {
 					cmdArgs = append(cmdArgs, strArg)
 				}
 			}
+		case []string:
+			cmdArgs = append(cmdArgs, cmd...)
 		}
 
 		if len(cmdArgs) == 0 {
@@ -721,6 +752,11 @@ func (s *Supervisor) scheduleCronJob(name string) {
 // shouldRestart determines if a service should be restarted
 func (s *Supervisor) shouldRestart(info *ServiceInfo) bool {
 	if info.Config.Cron != "" {
+		return false
+	}
+
+	// Don't restart if the service was explicitly stopped
+	if info.ExplicitlyStopped {
 		return false
 	}
 
