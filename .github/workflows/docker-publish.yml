@@ -12,58 +12,65 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
 
       - name: Login to Docker Hub
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v4
+      - name: Extract Debian metadata
+        id: meta-debian
+        uses: docker/metadata-action@v5
         with:
           images: eslym/stacker
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
+            type=semver,pattern={{version}}-debian
+            type=semver,pattern={{major}}.{{minor}}-debian
+            type=semver,pattern={{major}}-debian
             latest
 
-      # Extract version for Alpine tagging
-      - name: Extract version
-        id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+      - name: Extract Alpine metadata
+        id: meta-alpine
+        uses: docker/metadata-action@v5
+        with:
+          images: eslym/stacker
+          tags: |
+            type=semver,pattern={{version}}-alpine
+            type=semver,pattern={{major}}.{{minor}}-alpine
+            type=semver,pattern={{major}}-alpine
+            latest-alpine
 
       # Build and push Debian image for both x64 and arm64
       - name: Build and push Debian image
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@v5
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           build-args: |
             DISTRO=debian
           push: true
-          tags: eslym/stacker:debian,${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.meta-debian.outputs.tags }}
+          labels: ${{ steps.meta-debian.outputs.labels }}
 
       # Build and push Alpine image for both x64 and arm64
       - name: Build and push Alpine image
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@v5
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           build-args: |
             DISTRO=alpine
           push: true
-          tags: |
-            eslym/stacker:alpine
-            eslym/stacker:alpine-${{ steps.version.outputs.VERSION }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.meta-alpine.outputs.tags }}
+          labels: ${{ steps.meta-alpine.outputs.labels }}
