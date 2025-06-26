@@ -238,6 +238,36 @@ services:
 | `cron` | Cron schedule for this process (mutually exclusive with restart) | None |
 | `single` | Whether this process is a single instance | `false` |
 
+#### Environment Variable Substitution
+
+Stacker supports environment variable substitution in configuration files. This allows you to use environment variables in your configuration, making it more flexible and environment-specific.
+
+Supported syntax:
+- `$VAR` - Simple variable reference
+- `${VAR}` - Variable reference with braces
+- `${VAR:-default}` - Variable reference with default value (uses `default` if `VAR` is not set or empty)
+
+Example:
+```yaml
+services:
+  sleep:
+    cmd: ["sleep", "$SLEEP_FOR"]
+    env:
+      PORT: "${APP_PORT:-8080}"
+      HOST: "${APP_HOST:-localhost}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+  web:
+    cmd: "php -S ${APP_HOST:-localhost}:${APP_PORT:-8080}"
+    cwd: /var/www/html
+```
+
+In this example:
+- `$SLEEP_FOR` will be replaced with the value of the `SLEEP_FOR` environment variable
+- `${APP_PORT:-8080}` will use the value of `APP_PORT` if set, otherwise it will use `8080`
+- `${APP_HOST:-localhost}` will use the value of `APP_HOST` if set, otherwise it will use `localhost`
+
+Environment variable substitution is applied to all string values in the configuration, including command arguments, environment variables, working directories, and more.
+
 #### Restart Policy Options
 
 | Value | Description |

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 
@@ -156,12 +157,53 @@ func LoadConfig(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("error parsing config file: %s", err)
 	}
 
+	// Apply environment variable substitution
+	applyEnvSubstitution(&config)
+
 	// Validate the config
 	if err := validateConfig(&config); err != nil {
 		return nil, err
 	}
 
 	return &config, nil
+}
+
+// applyEnvSubstitution applies environment variable substitution to the config
+func applyEnvSubstitution(config *Config) {
+	// Apply to global config fields
+	config.Restart = substituteEnvVars(config.Restart)
+	config.Grace = substituteEnvVars(config.Grace)
+
+	// Apply to services
+	for name, service := range config.Services {
+		// Handle Cmd field which can be string or []interface{}
+		switch cmd := service.Cmd.(type) {
+		case string:
+			service.Cmd = substituteEnvVars(cmd)
+		case []interface{}:
+			service.Cmd = substituteEnvVarsInInterface(cmd)
+		}
+
+		// Handle other string fields
+		service.Cwd = substituteEnvVars(service.Cwd)
+		service.Grace = substituteEnvVars(service.Grace)
+		service.Cron = substituteEnvVars(service.Cron)
+
+		// Handle conflict field which can be string or []interface{}
+		if service.Conflict != nil {
+			service.Conflict = substituteEnvVarsInInterface(service.Conflict)
+		}
+
+		// Handle environment variables in the service's environment
+		if service.Env != nil {
+			for key, val := range service.Env {
+				service.Env[key] = substituteEnvVars(val)
+			}
+		}
+
+		// Update the service in the config
+		config.Services[name] = service
+	}
 }
 
 // validateConfig validates the configuration
@@ -202,6 +244,92 @@ func validateConfig(config *Config) error {
 	}
 
 	return nil
+}
+
+// substituteEnvVars replaces environment variables in a string
+// Supports $VAR, ${VAR}, and ${VAR:-default} syntax
+func substituteEnvVars(input string) string {
+	if input == "" {
+		return input
+	}
+
+	// Pattern for ${VAR:-default}
+	defaultPattern := regexp.MustCompile(`\${([^{}:]+):-([^{}]*)}`)
+	// Pattern for ${VAR}
+	bracesPattern := regexp.MustCompile(`\${([^{}]+)}`)
+	// Pattern for $VAR
+	simplePattern := regexp.MustCompile(`\$([a-zA-Z0-9_]+)`)
+
+	// Replace ${VAR:-default} with value or default
+	result := defaultPattern.ReplaceAllStringFunc(input, func(match string) string {
+		// Extract variable name and default value
+		parts := defaultPattern.FindStringSubmatch(match)
+		if len(parts) != 3 {
+			return match
+		}
+
+		varName := parts[1]
+		defaultValue := parts[2]
+
+		// Get environment variable value or use default
+		value := os.Getenv(varName)
+		if value == "" {
+			return defaultValue
+		}
+		return value
+	})
+
+	// Replace ${VAR} with value
+	result = bracesPattern.ReplaceAllStringFunc(result, func(match string) string {
+		// Extract variable name
+		parts := bracesPattern.FindStringSubmatch(match)
+		if len(parts) != 2 {
+			return match
+		}
+
+		varName := parts[1]
+
+		// Get environment variable value
+		return os.Getenv(varName)
+	})
+
+	// Replace $VAR with value
+	result = simplePattern.ReplaceAllStringFunc(result, func(match string) string {
+		// Extract variable name
+		parts := simplePattern.FindStringSubmatch(match)
+		if len(parts) != 2 {
+			return match
+		}
+
+		varName := parts[1]
+
+		// Get environment variable value
+		return os.Getenv(varName)
+	})
+
+	return result
+}
+
+// substituteEnvVarsInInterface recursively substitutes environment variables in interface{} values
+func substituteEnvVarsInInterface(value interface{}) interface{} {
+	switch v := value.(type) {
+	case string:
+		return substituteEnvVars(v)
+	case []interface{}:
+		result := make([]interface{}, len(v))
+		for i, item := range v {
+			result[i] = substituteEnvVarsInInterface(item)
+		}
+		return result
+	case map[string]interface{}:
+		result := make(map[string]interface{})
+		for key, val := range v {
+			result[key] = substituteEnvVarsInInterface(val)
+		}
+		return result
+	default:
+		return v
+	}
 }
 
 // NormalizeConfig creates a copy of the config with all inherited values explicitly set

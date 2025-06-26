@@ -328,3 +328,95 @@ services:
 		t.Errorf("Expected default grace to be 5s, got %s", cfg.Grace)
 	}
 }
+
+func TestEnvVarSubstitution(t *testing.T) {
+	// Set environment variables for testing
+	os.Setenv("SLEEP_FOR", "60")
+	os.Setenv("APP_PORT", "8080")
+	os.Setenv("APP_HOST", "localhost")
+	os.Setenv("LOG_LEVEL", "debug")
+	defer func() {
+		os.Unsetenv("SLEEP_FOR")
+		os.Unsetenv("APP_PORT")
+		os.Unsetenv("APP_HOST")
+		os.Unsetenv("LOG_LEVEL")
+	}()
+
+	// Create a temporary YAML file with environment variables
+	content := `
+restart: $RESTART_TIME
+grace: ${GRACE_TIME:-10s}
+services:
+  sleep:
+    cmd: ["sleep", "$SLEEP_FOR"]
+    env:
+      PORT: "${APP_PORT}"
+      HOST: "$APP_HOST"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      DEBUG: "${DEBUG:-false}"
+  web:
+    cmd: "php -S ${APP_HOST}:${APP_PORT}"
+    cwd: /var/www/html
+`
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatalf("Failed to create temporary config file: %v", err)
+	}
+
+	// Load the config
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+
+	// Verify environment variable substitution in global config
+	if cfg.Restart != "5s" { // RESTART_TIME is not set, should be default "5s" from validateConfig
+		t.Errorf("Expected restart to be '5s' (default), got %s", cfg.Restart)
+	}
+	if cfg.Grace != "10s" { // GRACE_TIME is not set, should use default from env var substitution
+		t.Errorf("Expected grace to be 10s (default), got %s", cfg.Grace)
+	}
+
+	// Verify environment variable substitution in sleep service
+	sleep, ok := cfg.Services["sleep"]
+	if !ok {
+		t.Errorf("Expected sleep service to exist")
+	} else {
+		cmdArray, ok := sleep.Cmd.([]interface{})
+		if !ok {
+			t.Errorf("Expected sleep.Cmd to be an array")
+		} else if len(cmdArray) != 2 {
+			t.Errorf("Expected sleep.Cmd to have 2 elements, got %d", len(cmdArray))
+		} else if cmdArray[1] != "60" {
+			t.Errorf("Expected sleep.Cmd[1] to be '60', got %v", cmdArray[1])
+		}
+
+		// Verify environment variables in service.Env
+		if sleep.Env["PORT"] != "8080" {
+			t.Errorf("Expected sleep.Env[PORT] to be '8080', got %s", sleep.Env["PORT"])
+		}
+		if sleep.Env["HOST"] != "localhost" {
+			t.Errorf("Expected sleep.Env[HOST] to be 'localhost', got %s", sleep.Env["HOST"])
+		}
+		if sleep.Env["LOG_LEVEL"] != "debug" {
+			t.Errorf("Expected sleep.Env[LOG_LEVEL] to be 'debug', got %s", sleep.Env["LOG_LEVEL"])
+		}
+		if sleep.Env["DEBUG"] != "false" {
+			t.Errorf("Expected sleep.Env[DEBUG] to be 'false' (default), got %s", sleep.Env["DEBUG"])
+		}
+	}
+
+	// Verify environment variable substitution in web service
+	web, ok := cfg.Services["web"]
+	if !ok {
+		t.Errorf("Expected web service to exist")
+	} else {
+		cmdStr, ok := web.Cmd.(string)
+		if !ok {
+			t.Errorf("Expected web.Cmd to be a string")
+		} else if cmdStr != "php -S localhost:8080" {
+			t.Errorf("Expected web.Cmd to be 'php -S localhost:8080', got %s", cmdStr)
+		}
+	}
+}
