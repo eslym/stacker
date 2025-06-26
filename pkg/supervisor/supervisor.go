@@ -833,7 +833,13 @@ func (s *Supervisor) shouldRestart(info *ServiceInfo) bool {
 	case bool:
 		return r
 	case string:
-		return r == "true" || r == "always" || r == "exponential" || r == "immediate"
+		// If restart is "true" or "always", it should always restart
+		if r == "true" || r == "always" || r == "exponential" || r == "immediate" {
+			return true
+		}
+		// Otherwise, check if it's a valid duration (which means it should restart)
+		_, err := time.ParseDuration(r)
+		return err == nil
 	case map[string]interface{}:
 		if mode, ok := r["mode"].(string); ok {
 			return mode == "always" || mode == "on-failure" && info.ExitCode != 0
@@ -859,11 +865,35 @@ func (s *Supervisor) calculateRestartDelay(info *ServiceInfo) time.Duration {
 	var err error
 
 	switch r := restart.(type) {
+	case bool:
+		// If restart is true, use the global restart delay
+		if r {
+			delay, err = time.ParseDuration(baseDelay)
+		} else {
+			// If restart is false, this shouldn't happen, but return a default delay
+			delay = 5 * time.Second
+		}
 	case string:
 		if r == "immediate" {
 			return 0
 		}
-		delay, err = time.ParseDuration(baseDelay)
+		// If restart is "true" or "always", use the global restart delay
+		if r == "true" || r == "always" {
+			delay, err = time.ParseDuration(baseDelay)
+		} else if r == "exponential" {
+			// For exponential backoff, use the global restart delay as the base
+			delay, err = time.ParseDuration(baseDelay)
+			if err == nil {
+				delay = delay * time.Duration(info.RestartCount+1)
+			}
+		} else {
+			// Try to parse the string as a duration
+			delay, err = time.ParseDuration(r)
+			if err != nil {
+				// If it's not a valid duration, fall back to the global restart delay
+				delay, err = time.ParseDuration(baseDelay)
+			}
+		}
 	case map[string]interface{}:
 		if base, ok := r["base"].(string); ok {
 			delay, err = time.ParseDuration(base)

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -201,6 +202,11 @@ func validateConfig(config *Config) error {
 	// Set defaults
 	if config.Restart == "" {
 		config.Restart = "5s"
+	} else {
+		// Validate that the global restart is a valid duration
+		if _, err := time.ParseDuration(config.Restart); err != nil {
+			return fmt.Errorf("invalid global restart value: %s, must be a valid duration", config.Restart)
+		}
 	}
 
 	if config.Grace == "" {
@@ -318,6 +324,83 @@ func substituteEnvVarsInInterface(value interface{}) interface{} {
 	}
 }
 
+// expandRestartPolicy converts a restart policy to a RestartPolicy struct
+func expandRestartPolicy(restart interface{}, baseDelay string) *RestartPolicy {
+	switch r := restart.(type) {
+	case bool:
+		if r {
+			return &RestartPolicy{
+				Mode: "always",
+				Base: baseDelay,
+			}
+		}
+		return &RestartPolicy{
+			Mode: "never",
+		}
+	case string:
+		if r == "true" || r == "always" {
+			return &RestartPolicy{
+				Mode: "always",
+				Base: baseDelay,
+			}
+		} else if r == "exponential" {
+			return &RestartPolicy{
+				Mode:        "always",
+				Base:        baseDelay,
+				Exponential: true,
+			}
+		} else if r == "immediate" {
+			return &RestartPolicy{
+				Mode: "always",
+				Base: "0s",
+			}
+		} else {
+			// Try to parse as duration
+			if _, err := time.ParseDuration(r); err == nil {
+				return &RestartPolicy{
+					Mode: "always",
+					Base: r,
+				}
+			}
+			// Fall back to global restart delay
+			return &RestartPolicy{
+				Mode: "always",
+				Base: baseDelay,
+			}
+		}
+	case map[string]interface{}:
+		policy := &RestartPolicy{
+			Mode: "always", // Default mode
+		}
+
+		if mode, ok := r["mode"].(string); ok {
+			policy.Mode = mode
+		}
+
+		if base, ok := r["base"].(string); ok {
+			policy.Base = base
+		} else {
+			policy.Base = baseDelay
+		}
+
+		if exp, ok := r["exponential"].(bool); ok {
+			policy.Exponential = exp
+		}
+
+		if max, ok := r["max"].(string); ok {
+			policy.Max = max
+		}
+
+		if maxRetries, ok := r["maxRetries"].(int); ok {
+			policy.MaxRetries = maxRetries
+		}
+
+		return policy
+	}
+
+	return nil
+}
+
 // NormalizeConfig creates a copy of the config with all inherited values explicitly set
 func NormalizeConfig(config *Config) *Config {
 	// Create a deep copy of the config
@@ -335,6 +418,17 @@ func NormalizeConfig(config *Config) *Config {
 		// If service doesn't have a restart policy but should inherit from global config
 		if service.Restart == nil && service.Cron == "" {
 			normalizedService.Restart = config.Restart
+		} else if service.Restart != nil && service.Cron == "" {
+			// Expand the restart policy
+			expandedPolicy := expandRestartPolicy(service.Restart, config.Restart)
+			if expandedPolicy != nil {
+				normalizedService.Restart = expandedPolicy
+			}
+		}
+
+		// If service doesn't have a grace period, inherit from global config
+		if service.Grace == "" {
+			normalizedService.Grace = config.Grace
 		}
 
 		normalizedConfig.Services[name] = normalizedService
