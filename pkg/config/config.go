@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -50,24 +51,90 @@ type Config struct {
 
 // GetDefaultConfigPath returns the default config path based on the OS
 func GetDefaultConfigPath() string {
-	// Windows default path
-	return "C:\\ProgramData\\Stacker\\config.yaml"
+	// OS-specific default paths
+	switch runtime.GOOS {
+	case "windows":
+		return "C:\\ProgramData\\Stacker\\config"
+	case "darwin":
+		return "/Library/Application Support/Stacker/config"
+	default: // linux and others
+		return "/usr/local/etc/stacker/config"
+	}
+}
+
+// FindConfigFile tries to find a config file in multiple locations
+func FindConfigFile(configPath string) (string, error) {
+	// If a specific path is provided, use it
+	if configPath != "" {
+		return configPath, nil
+	}
+
+	// Try to find config file in the following order:
+
+	// 1. Current directory: ./stacker.{json,yml,yaml}
+	currentDirPaths := []string{
+		"stacker.json",
+		"stacker.yml",
+		"stacker.yaml",
+	}
+
+	for _, path := range currentDirPaths {
+		if _, err := os.Stat(path); err == nil {
+			return path, nil
+		}
+	}
+
+	// 2. Environment variable: STACKER_CONFIG_PATH
+	if envPath := os.Getenv("STACKER_CONFIG_PATH"); envPath != "" {
+		if _, err := os.Stat(envPath); err == nil {
+			return envPath, nil
+		}
+	}
+
+	// 3. User config directory: $HOME/.config/stacker/config.{json,yml,yaml}
+	homeDir, err := os.UserHomeDir()
+	if err == nil {
+		homePaths := []string{
+			filepath.Join(homeDir, ".config", "stacker", "config.json"),
+			filepath.Join(homeDir, ".config", "stacker", "config.yml"),
+			filepath.Join(homeDir, ".config", "stacker", "config.yaml"),
+		}
+
+		for _, path := range homePaths {
+			if _, err := os.Stat(path); err == nil {
+				return path, nil
+			}
+		}
+	}
+
+	// 4. OS-specific fallback path
+	defaultBasePath := GetDefaultConfigPath()
+	defaultPaths := []string{
+		defaultBasePath + ".json",
+		defaultBasePath + ".yml",
+		defaultBasePath + ".yaml",
+	}
+
+	for _, path := range defaultPaths {
+		if _, err := os.Stat(path); err == nil {
+			return path, nil
+		}
+	}
+
+	// No config file found
+	return "", fmt.Errorf("no config file found in any of the default locations")
 }
 
 // LoadConfig loads the configuration from a file
 func LoadConfig(configPath string) (*Config, error) {
-	if configPath == "" {
-		configPath = GetDefaultConfigPath()
-	}
-
-	// Check if the file exists
-	_, err := os.Stat(configPath)
+	// Find the config file
+	foundPath, err := FindConfigFile(configPath)
 	if err != nil {
-		return nil, fmt.Errorf("config file not found: %s", configPath)
+		return nil, err
 	}
 
 	// Read the file
-	data, err := os.ReadFile(configPath)
+	data, err := os.ReadFile(foundPath)
 	if err != nil {
 		return nil, fmt.Errorf("error reading config file: %s", err)
 	}
@@ -75,7 +142,7 @@ func LoadConfig(configPath string) (*Config, error) {
 	var config Config
 
 	// Determine file type by extension
-	ext := strings.ToLower(filepath.Ext(configPath))
+	ext := strings.ToLower(filepath.Ext(foundPath))
 	switch ext {
 	case ".json":
 		err = json.Unmarshal(data, &config)

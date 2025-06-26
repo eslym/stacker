@@ -132,11 +132,17 @@ CMD ["/usr/local/bin/stacker", "--verbose"]
 
 ## ⚙️ Configuration
 
-Stacker uses a configuration file in YAML or JSON format. By default, it looks for a configuration file at:
-- Windows: `C:\ProgramData\Stacker\config.yaml`
-- Linux: `/usr/local/etc/stacker/config.yaml`
+Stacker uses a configuration file in YAML or JSON format. It looks for a configuration file in the following locations (in order):
 
-You can specify a different configuration file using the `--config` flag.
+1. Current directory: `./stacker.json`, `./stacker.yml`, or `./stacker.yaml`
+2. Environment variable: `STACKER_CONFIG_PATH`
+3. User config directory: `$HOME/.config/stacker/config.{json,yml,yaml}` (`%HOME%` for Windows)
+4. OS-specific default paths:
+   - Windows: `C:\ProgramData\Stacker\config.{json,yml,yaml}`
+   - macOS: `/Library/Application Support/Stacker/config.{json,yml,yaml}`
+   - Linux: `/usr/local/etc/stacker/config.{json,yml,yaml}`
+
+You can also specify a specific configuration file using the `--config` flag.
 
 ### Example Configuration (YAML)
 
