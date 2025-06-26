@@ -251,6 +251,9 @@ services:
 
 ## 🖥️ Usage
 
+> [!WARNING]
+> Usage on Windows is very experimental. Some process handling features are not available on Windows, which may affect functionality and stability.
+
 ### Basic Usage
 
 ```bash
