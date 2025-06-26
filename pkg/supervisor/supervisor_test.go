@@ -33,8 +33,9 @@ func MockConfig() *config.Config {
 
 	if runtime.GOOS == "windows" {
 		// On Windows, use commands that run longer for tests that check RunningProcesses
-		service1Cmd = []string{"cmd.exe", "/c", "timeout", "2"}
-		service2Cmd = []string{"cmd.exe", "/c", "timeout", "2"}
+		// Use ping with a count and timeout for more reliable testing
+		service1Cmd = []string{"cmd.exe", "/c", "ping", "-n", "10", "127.0.0.1"}
+		service2Cmd = []string{"cmd.exe", "/c", "ping", "-n", "10", "127.0.0.1"}
 		cronServiceCmd = []string{"cmd.exe", "/c", "echo", "cron-service"}
 		conflict1Cmd = []string{"cmd.exe", "/c", "echo", "conflict1"}
 		conflict2Cmd = []string{"cmd.exe", "/c", "echo", "conflict2"}

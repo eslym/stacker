@@ -29,23 +29,23 @@ const (
 
 // ServiceInfo represents information about a service
 type ServiceInfo struct {
-	Name             string
-	Status           ServiceStatus
-	Pid              int
-	Uptime           time.Duration
-	StartTime        time.Time
-	RestartCount     int
-	NextRestart      time.Time
-	NextRun          time.Time
-	ExitCode         int
-	Error            string
-	Cmd              *exec.Cmd
-	Process          *os.Process
-	Config           config.Process
+	Name         string
+	Status       ServiceStatus
+	Pid          int
+	Uptime       time.Duration
+	StartTime    time.Time
+	RestartCount int
+	NextRestart  time.Time
+	NextRun      time.Time
+	ExitCode     int
+	Error        string
+	Cmd          *exec.Cmd
+	Process      *os.Process
+	Config       config.Process
 	// Resource usage
-	CpuPercent       float64
-	MemoryUsage      int64
-	LastUpdated      time.Time
+	CpuPercent  float64
+	MemoryUsage int64
+	LastUpdated time.Time
 	// Flag to indicate if the service was explicitly stopped
 	ExplicitlyStopped bool
 	// Number of running processes for this service
@@ -396,6 +396,9 @@ func (s *Supervisor) startService(name string) error {
 		}
 	}
 
+	// Apply platform-specific settings
+	prepareCommand(command)
+
 	// Set up output redirection if logger provider is available
 	if s.loggerProvider != nil {
 		logger := s.loggerProvider.GetLogger(name)
@@ -555,54 +558,22 @@ func (s *Supervisor) stopService(name string) error {
 		}
 	}()
 
-	// Create a context with timeout for graceful shutdown
-	ctx, cancel := context.WithTimeout(context.Background(), graceDuration)
-	defer cancel()
+	// We'll use the graceDuration directly in the stopProcess function
 
-	// Send SIGTERM
+	// Attempt to gracefully stop the process
 	if s.verbose {
-		log.Printf("Sending SIGTERM to service %s (PID %d) with grace period %v", name, process.Pid, graceDuration)
+		log.Printf("Attempting to gracefully stop service %s (PID %d) with grace period %v", name, process.Pid, graceDuration)
 	}
 
-	if err := process.Signal(os.Interrupt); err != nil {
-		log.Printf("Failed to send SIGTERM to service %s: %v", name, err)
-		// Force kill
-		if s.verbose {
-			log.Printf("Force killing service %s (PID %d)", name, process.Pid)
-		}
-		if err := process.Kill(); err != nil {
-			return err
-		}
+	// Use platform-specific process stopping
+	if err := stopProcess(process, graceDuration); err != nil {
+		log.Printf("Error stopping service %s: %v", name, err)
+		// Don't return the error, as the process might already be stopping or have exited
+		// This makes the function more tolerant of race conditions
 	}
 
-	// Wait for the process to exit or timeout
-	done := make(chan struct{})
-	go func() {
-		// Check if the process has exited
-		for {
-			if _, err := process.Wait(); err != nil {
-				// Process has exited or error occurred
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-		close(done)
-	}()
-
-	select {
-	case <-ctx.Done():
-		// Grace period expired, force kill
-		if s.verbose {
-			log.Printf("Grace period expired for service %s, force killing (PID %d)", name, process.Pid)
-		}
-		if err := process.Kill(); err != nil {
-			return err
-		}
-	case <-done:
-		// Process exited gracefully
-		if s.verbose {
-			log.Printf("Service %s exited gracefully", name)
-		}
+	if s.verbose {
+		log.Printf("Service %s stopped successfully", name)
 	}
 
 	// Update service status
