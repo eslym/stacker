@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -115,7 +116,19 @@ func (a *AdminServer) Stop() error {
 	}
 	a.mu.Unlock()
 
-	return a.server.Close()
+	// Create a context with timeout for graceful shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Shutdown the server gracefully
+	err := a.server.Shutdown(ctx)
+	if err != nil {
+		// If shutdown times out or fails, force close
+		log.Printf("Admin server graceful shutdown failed: %v, forcing close", err)
+		return a.server.Close()
+	}
+
+	return nil
 }
 
 // handleServices handles requests to /api/services

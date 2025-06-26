@@ -253,17 +253,41 @@ func (s *Supervisor) Stop() {
 		}
 	}
 
-	// Wait for all services to stop
+	// Wait for all services to stop with a timeout
 	if s.verbose {
-		log.Printf("Waiting for all services to stop")
+		log.Printf("Waiting for all services to stop (with timeout)")
 	}
-	s.wg.Wait()
 
-	// Wait for cron jobs to finish
-	if s.verbose {
-		log.Printf("Waiting for cron jobs to finish")
+	// Create a channel to signal when all services have stopped
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+
+	// Wait with timeout (30 seconds should be enough for most services)
+	select {
+	case <-done:
+		if s.verbose {
+			log.Printf("All services stopped successfully")
+		}
+	case <-time.After(30 * time.Second):
+		log.Printf("WARNING: Timeout waiting for services to stop, forcing shutdown")
 	}
-	<-ctx.Done()
+
+	// Wait for cron jobs to finish with timeout
+	if s.verbose {
+		log.Printf("Waiting for cron jobs to finish (with timeout)")
+	}
+
+	select {
+	case <-ctx.Done():
+		if s.verbose {
+			log.Printf("All cron jobs finished successfully")
+		}
+	case <-time.After(5 * time.Second):
+		log.Printf("WARNING: Timeout waiting for cron jobs to finish, forcing shutdown")
+	}
 
 	if s.verbose {
 		log.Printf("Supervisor stopped successfully")
@@ -522,16 +546,29 @@ func (s *Supervisor) stopService(name string) error {
 	}
 
 	// Wait for the process to exit or timeout
+	done := make(chan struct{})
+	go func() {
+		// Check if the process has exited
+		for {
+			if _, err := process.Wait(); err != nil {
+				// Process has exited or error occurred
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		close(done)
+	}()
+
 	select {
 	case <-ctx.Done():
-		// Force kill
+		// Grace period expired, force kill
 		if s.verbose {
 			log.Printf("Grace period expired for service %s, force killing (PID %d)", name, process.Pid)
 		}
 		if err := process.Kill(); err != nil {
 			return err
 		}
-	default:
+	case <-done:
 		// Process exited gracefully
 		if s.verbose {
 			log.Printf("Service %s exited gracefully", name)

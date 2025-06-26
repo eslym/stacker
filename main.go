@@ -147,13 +147,29 @@ func main() {
 	shutdownTimestamp := time.Now().Format("2006-01-02 15:04:05")
 	fmt.Printf("[%s] [stacker] Shutting down...\n", shutdownTimestamp)
 
-	// Stop admin interface
-	if err := adminServer.Stop(); err != nil {
-		log.Printf("Error stopping admin server: %v", err)
-	}
+	// Create a channel to signal when shutdown is complete
+	shutdownComplete := make(chan struct{})
 
-	// Stop supervisor
-	sup.Stop()
+	// Start the shutdown process in a goroutine
+	go func() {
+		// Stop admin interface
+		if err := adminServer.Stop(); err != nil {
+			log.Printf("Error stopping admin server: %v", err)
+		}
+
+		// Stop supervisor
+		sup.Stop()
+
+		close(shutdownComplete)
+	}()
+
+	// Wait for shutdown to complete with a timeout
+	select {
+	case <-shutdownComplete:
+		// Shutdown completed normally
+	case <-time.After(60 * time.Second):
+		log.Printf("WARNING: Shutdown timed out after 60 seconds, forcing exit")
+	}
 
 	// Use timestamp in log message
 	completeTimestamp := time.Now().Format("2006-01-02 15:04:05")
