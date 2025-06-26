@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -15,6 +14,7 @@ import (
 	"github.com/eslym/stacker/pkg/cli"
 	"github.com/eslym/stacker/pkg/config"
 	"github.com/eslym/stacker/pkg/supervisor"
+	"gopkg.in/yaml.v3"
 )
 
 // ServiceLoggerProvider implements the supervisor.LoggerProvider interface
@@ -87,10 +87,10 @@ func main() {
 		fmt.Println("Normalized configuration:")
 		// Create a normalized config with inherited values explicitly set
 		normalizedCfg := config.NormalizeConfig(cfg)
-		if cfgJson, err := json.MarshalIndent(normalizedCfg, "", "  "); err == nil {
-			fmt.Println(string(cfgJson))
+		if cfgYaml, err := yaml.Marshal(normalizedCfg); err == nil {
+			fmt.Println(string(cfgYaml))
 		} else {
-			log.Printf("Error marshaling config to JSON: %v", err)
+			log.Printf("Error marshaling config to YAML: %v", err)
 		}
 	}
 
