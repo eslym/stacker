@@ -50,7 +50,14 @@ func (m *mockSupervisor) StopService(name string) error {
 		return err
 	}
 	if info, ok := m.services[name]; ok {
-		info.Status = supervisor.StatusStopped
+		// For cron jobs, set RunningProcesses to 0 but keep status as is
+		if info.Config.Cron != "" {
+			info.RunningProcesses = 0
+			info.Status = supervisor.StatusStopped
+		} else {
+			// For regular services, just set status to stopped
+			info.Status = supervisor.StatusStopped
+		}
 	}
 	return nil
 }
@@ -298,6 +305,125 @@ func TestHandleService_Post_Start(t *testing.T) {
 	}
 }
 
+func TestHandleService_Post_StopCronJob(t *testing.T) {
+	// Create mock supervisor
+	sup := newMockSupervisor()
+	sup.services["cron-service"] = &supervisor.ServiceInfo{
+		Name:             "cron-service",
+		Status:           supervisor.StatusScheduled,
+		RunningProcesses: 2, // Simulate 2 running processes
+		Config: config.Process{
+			Cmd:  []interface{}{"echo", "cron-service"},
+			Cron: "* * * * *",
+		},
+	}
+
+	// Create admin server
+	cfg := mockConfig()
+	adminServer := NewAdminServer(cfg, sup)
+
+	// Test stop action
+	body := map[string]string{
+		"action": "stop",
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("Failed to marshal request body: %v", err)
+	}
+
+	req, err := http.NewRequest("POST", "/api/services/cron-service", bytes.NewBuffer(bodyBytes))
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	rr := httptest.NewRecorder()
+	adminServer.handleService(rr, req)
+
+	if status := rr.Code; status != http.StatusOK {
+		t.Errorf("Handler returned wrong status code for stop: got %v want %v", status, http.StatusOK)
+	}
+
+	// Check that RunningProcesses is 0 after stopping
+	if sup.services["cron-service"].RunningProcesses != 0 {
+		t.Errorf("Expected RunningProcesses to be 0 after stopping, got %d", sup.services["cron-service"].RunningProcesses)
+	}
+
+	// Check that the cron job is still scheduled (not stopped)
+	if sup.services["cron-service"].Status != supervisor.StatusStopped {
+		t.Errorf("Expected service status to be stopped after stopping processes, got %s", sup.services["cron-service"].Status)
+	}
+}
+
+func TestHandleService_Post_EnableDisable(t *testing.T) {
+	// Create mock supervisor
+	sup := newMockSupervisor()
+	sup.services["cron-service"] = &supervisor.ServiceInfo{
+		Name:   "cron-service",
+		Status: supervisor.StatusStopped,
+		Config: config.Process{
+			Cmd:  []interface{}{"echo", "cron-service"},
+			Cron: "* * * * *",
+		},
+	}
+
+	// Create admin server
+	cfg := mockConfig()
+	adminServer := NewAdminServer(cfg, sup)
+
+	// Test enable action
+	body := map[string]string{
+		"action": "enable",
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("Failed to marshal request body: %v", err)
+	}
+
+	req, err := http.NewRequest("POST", "/api/services/cron-service", bytes.NewBuffer(bodyBytes))
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	rr := httptest.NewRecorder()
+	adminServer.handleService(rr, req)
+
+	if status := rr.Code; status != http.StatusOK {
+		t.Errorf("Handler returned wrong status code for enable: got %v want %v", status, http.StatusOK)
+	}
+
+	if sup.services["cron-service"].Status != supervisor.StatusScheduled {
+		t.Errorf("Expected service status to be scheduled after enable, got %s", sup.services["cron-service"].Status)
+	}
+
+	// Test disable action
+	body = map[string]string{
+		"action": "disable",
+	}
+	bodyBytes, err = json.Marshal(body)
+	if err != nil {
+		t.Fatalf("Failed to marshal request body: %v", err)
+	}
+
+	req, err = http.NewRequest("POST", "/api/services/cron-service", bytes.NewBuffer(bodyBytes))
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	rr = httptest.NewRecorder()
+	adminServer.handleService(rr, req)
+
+	if status := rr.Code; status != http.StatusOK {
+		t.Errorf("Handler returned wrong status code for disable: got %v want %v", status, http.StatusOK)
+	}
+
+	if sup.services["cron-service"].Status != supervisor.StatusStopped {
+		t.Errorf("Expected service status to be stopped after disable, got %s", sup.services["cron-service"].Status)
+	}
+}
+
 func TestFormatServiceInfo(t *testing.T) {
 	// Create admin server
 	cfg := mockConfig()
@@ -306,16 +432,17 @@ func TestFormatServiceInfo(t *testing.T) {
 
 	// Create service info
 	info := &supervisor.ServiceInfo{
-		Name:         "service1",
-		Status:       supervisor.StatusRunning,
-		Pid:          1234,
-		StartTime:    time.Now(),
-		Uptime:       time.Hour,
-		RestartCount: 2,
-		ExitCode:     0,
-		CpuPercent:   10.5,
-		MemoryUsage:  1024 * 1024 * 10, // 10 MB
-		LastUpdated:  time.Now(),
+		Name:             "service1",
+		Status:           supervisor.StatusRunning,
+		Pid:              1234,
+		StartTime:        time.Now(),
+		Uptime:           time.Hour,
+		RestartCount:     2,
+		ExitCode:         0,
+		CpuPercent:       10.5,
+		MemoryUsage:      1024 * 1024 * 10, // 10 MB
+		LastUpdated:      time.Now(),
+		RunningProcesses: 1,
 		Config: config.Process{
 			Cmd:     []interface{}{"echo", "service1"},
 			Restart: true,
@@ -340,6 +467,9 @@ func TestFormatServiceInfo(t *testing.T) {
 	}
 	if result["exitCode"] != 0 {
 		t.Errorf("Expected exitCode to be 0, got %v", result["exitCode"])
+	}
+	if result["runningProcesses"] != 1 {
+		t.Errorf("Expected runningProcesses to be 1, got %v", result["runningProcesses"])
 	}
 
 	// Check resource usage

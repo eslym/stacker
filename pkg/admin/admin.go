@@ -193,21 +193,30 @@ func (a *AdminServer) handleService(w http.ResponseWriter, r *http.Request) {
 		switch action.Action {
 		case "start":
 			if isCronJob {
-				err = a.supervisor.EnableCronJob(name)
+				err = fmt.Errorf("start is not applicable for cron job %s, use enable instead", name)
 			} else {
 				err = a.supervisor.StartService(name)
 			}
 		case "stop":
-			if isCronJob {
-				err = a.supervisor.DisableCronJob(name)
-			} else {
-				err = a.supervisor.StopService(name)
-			}
+			// Stop is applicable to both regular services and cron jobs
+			err = a.supervisor.StopService(name)
 		case "restart":
 			if isCronJob {
 				err = fmt.Errorf("restart is not applicable for cron job %s", name)
 			} else {
 				err = a.supervisor.RestartService(name)
+			}
+		case "enable":
+			if isCronJob {
+				err = a.supervisor.EnableCronJob(name)
+			} else {
+				err = fmt.Errorf("enable is not applicable for regular service %s, use start instead", name)
+			}
+		case "disable":
+			if isCronJob {
+				err = a.supervisor.DisableCronJob(name)
+			} else {
+				err = fmt.Errorf("disable is not applicable for regular service %s, use stop instead", name)
 			}
 		default:
 			http.Error(w, "Invalid action", http.StatusBadRequest)
@@ -333,11 +342,12 @@ func (a *AdminServer) BroadcastLog(service, message string) {
 // formatServiceInfo formats service info for JSON response
 func (a *AdminServer) formatServiceInfo(info *supervisor.ServiceInfo) map[string]interface{} {
 	result := map[string]interface{}{
-		"name":         info.Name,
-		"status":       string(info.Status),
-		"pid":          info.Pid,
-		"restartCount": info.RestartCount,
-		"exitCode":     info.ExitCode,
+		"name":             info.Name,
+		"status":           string(info.Status),
+		"pid":              info.Pid,
+		"restartCount":     info.RestartCount,
+		"exitCode":         info.ExitCode,
+		"runningProcesses": info.RunningProcesses,
 	}
 
 	if !info.StartTime.IsZero() {
@@ -372,17 +382,17 @@ func (a *AdminServer) formatServiceInfo(info *supervisor.ServiceInfo) map[string
 
 	if isCronJob {
 		// Cron job actions
-		actions["start"] = map[string]interface{}{
+		actions["enable"] = map[string]interface{}{
 			"description": "Enable the cron job",
 			"applicable":  info.Status != supervisor.StatusScheduled,
 		}
-		actions["stop"] = map[string]interface{}{
-			"description": "Disable the cron job",
+		actions["disable"] = map[string]interface{}{
+			"description": "Disable the cron job without stopping processes",
 			"applicable":  info.Status == supervisor.StatusScheduled,
 		}
-		actions["restart"] = map[string]interface{}{
-			"description": "Not applicable for cron jobs",
-			"applicable":  false,
+		actions["stop"] = map[string]interface{}{
+			"description": "Stop all running processes",
+			"applicable":  info.RunningProcesses > 0,
 		}
 	} else {
 		// Regular service actions

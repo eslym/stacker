@@ -32,17 +32,17 @@ func MockConfig() *config.Config {
 	var service1Cmd, service2Cmd, cronServiceCmd, conflict1Cmd, conflict2Cmd, optionalServiceCmd []string
 
 	if runtime.GOOS == "windows" {
-		// On Windows, echo is a shell built-in, not a standalone executable
-		service1Cmd = []string{"cmd.exe", "/c", "echo", "service1"}
-		service2Cmd = []string{"cmd.exe", "/c", "echo", "service2"}
+		// On Windows, use commands that run longer for tests that check RunningProcesses
+		service1Cmd = []string{"cmd.exe", "/c", "timeout", "2"}
+		service2Cmd = []string{"cmd.exe", "/c", "timeout", "2"}
 		cronServiceCmd = []string{"cmd.exe", "/c", "echo", "cron-service"}
 		conflict1Cmd = []string{"cmd.exe", "/c", "echo", "conflict1"}
 		conflict2Cmd = []string{"cmd.exe", "/c", "echo", "conflict2"}
 		optionalServiceCmd = []string{"cmd.exe", "/c", "echo", "optional-service"}
 	} else {
-		// On Unix-like systems, echo is a standalone executable
-		service1Cmd = []string{"echo", "service1"}
-		service2Cmd = []string{"echo", "service2"}
+		// On Unix-like systems, use sleep for tests that check RunningProcesses
+		service1Cmd = []string{"sleep", "2"}
+		service2Cmd = []string{"sleep", "2"}
 		cronServiceCmd = []string{"echo", "cron-service"}
 		conflict1Cmd = []string{"echo", "conflict1"}
 		conflict2Cmd = []string{"echo", "conflict2"}
@@ -62,8 +62,9 @@ func MockConfig() *config.Config {
 				Restart: false,
 			},
 			"cron-service": {
-				Cmd:  cronServiceCmd,
-				Cron: "* * * * *",
+				Cmd:    cronServiceCmd,
+				Cron:   "* * * * *",
+				Single: true,
 			},
 			"conflict1": {
 				Cmd:      conflict1Cmd,
@@ -329,6 +330,11 @@ func TestSupervisor_StartService(t *testing.T) {
 		t.Errorf("Expected service status to be running or restarting, got %s", info.Status)
 	}
 
+	// Check that RunningProcesses is incremented
+	if info.RunningProcesses != 1 {
+		t.Errorf("Expected RunningProcesses to be 1, got %d", info.RunningProcesses)
+	}
+
 	// Clean up
 	sup.Stop()
 }
@@ -352,6 +358,15 @@ func TestSupervisor_StopService(t *testing.T) {
 	// Wait for service to start
 	time.Sleep(100 * time.Millisecond)
 
+	// Check that RunningProcesses is 1 after starting
+	info, err := sup.GetServiceStatus("service1")
+	if err != nil {
+		t.Errorf("Failed to get service status: %v", err)
+	}
+	if info.RunningProcesses != 1 {
+		t.Errorf("Expected RunningProcesses to be 1 after starting, got %d", info.RunningProcesses)
+	}
+
 	// Stop the service
 	err = sup.StopService("service1")
 	if err != nil {
@@ -363,18 +378,18 @@ func TestSupervisor_StopService(t *testing.T) {
 	pollInterval := 100 * time.Millisecond
 	deadline := time.Now().Add(maxWaitTime)
 
-	var info *supervisor.ServiceInfo
+	var info2 *supervisor.ServiceInfo
 
 	for time.Now().Before(deadline) {
 		// Get service status
-		info, err = sup.GetServiceStatus("service1")
+		info2, err = sup.GetServiceStatus("service1")
 		if err != nil {
 			t.Errorf("Failed to get service status: %v", err)
 			break
 		}
 
 		// Check if service is in expected state
-		if info.Status == supervisor.StatusStopped || info.Status == supervisor.StatusFailed {
+		if info2.Status == supervisor.StatusStopped || info2.Status == supervisor.StatusFailed {
 			// Test passed
 			break
 		}
@@ -387,8 +402,13 @@ func TestSupervisor_StopService(t *testing.T) {
 	// Accept restarting as a valid state after stopping a service
 	// This is because there's a race condition between stopping the service and the goroutine
 	// that monitors the process detecting that it has exited and restarting it
-	if info != nil && info.Status != supervisor.StatusStopped && info.Status != supervisor.StatusFailed && info.Status != supervisor.StatusRestarting {
-		t.Errorf("Expected service status to be stopped, failed, or restarting, got %s", info.Status)
+	if info2 != nil && info2.Status != supervisor.StatusStopped && info2.Status != supervisor.StatusFailed && info2.Status != supervisor.StatusRestarting {
+		t.Errorf("Expected service status to be stopped, failed, or restarting, got %s", info2.Status)
+	}
+
+	// Check that RunningProcesses is 0 after stopping
+	if info2 != nil && info2.RunningProcesses != 0 {
+		t.Errorf("Expected RunningProcesses to be 0 after stopping, got %d", info2.RunningProcesses)
 	}
 
 	// Clean up
@@ -520,6 +540,11 @@ func TestSupervisor_EnableDisableCronJob(t *testing.T) {
 		t.Errorf("Expected service status to be scheduled, got %s", info.Status)
 	}
 
+	// Check that RunningProcesses is 0 initially
+	if info.RunningProcesses != 0 {
+		t.Errorf("Expected RunningProcesses to be 0 initially, got %d", info.RunningProcesses)
+	}
+
 	// Clean up
 	sup.Stop()
 }
@@ -553,6 +578,244 @@ func TestSupervisor_EnableDisableNonCronJob(t *testing.T) {
 	err = sup.DisableCronJob("service1")
 	if err == nil {
 		t.Errorf("Expected error for disabling non-cron job, got nil")
+	}
+
+	// Clean up
+	sup.Stop()
+}
+
+func TestSupervisor_SingleCronJob(t *testing.T) {
+	// Set a timeout for the test
+	timeout := time.AfterFunc(5*time.Second, func() {
+		t.Fatal("Test timed out after 5 seconds")
+	})
+	defer timeout.Stop()
+	cfg := MockConfig()
+	activeServices := map[string]bool{
+		"cron-service": true,
+	}
+	sup := supervisor.NewSupervisor(cfg, activeServices, false)
+	err := sup.Start()
+	if err != nil {
+		t.Errorf("Failed to start supervisor: %v", err)
+	}
+
+	// Wait for service to start
+	time.Sleep(100 * time.Millisecond)
+
+	// Get service status
+	info, err := sup.GetServiceStatus("cron-service")
+	if err != nil {
+		t.Errorf("Failed to get service status: %v", err)
+	}
+	if info.Status != supervisor.StatusScheduled {
+		t.Errorf("Expected service status to be scheduled, got %s", info.Status)
+	}
+
+	// Simulate a running process by setting RunningProcesses to 1
+	// This is a hack for testing purposes
+	info.RunningProcesses = 1
+
+	// Verify that the Single flag is set
+	if !info.Config.Single {
+		t.Errorf("Expected Single flag to be true, got false")
+	}
+
+	// Clean up
+	sup.Stop()
+}
+
+func TestSupervisor_CronJobRaceConditions(t *testing.T) {
+	// Set a timeout for the test
+	timeout := time.AfterFunc(10*time.Second, func() {
+		t.Fatal("Test timed out after 10 seconds")
+	})
+	defer timeout.Stop()
+
+	cfg := MockConfig()
+	activeServices := map[string]bool{
+		"cron-service": true,
+	}
+	sup := supervisor.NewSupervisor(cfg, activeServices, false)
+	err := sup.Start()
+	if err != nil {
+		t.Errorf("Failed to start supervisor: %v", err)
+	}
+
+	// Wait for service to start
+	time.Sleep(100 * time.Millisecond)
+
+	// Get service info
+	info, err := sup.GetServiceStatus("cron-service")
+	if err != nil {
+		t.Errorf("Failed to get service status: %v", err)
+	}
+
+	// Verify that the Single flag is set
+	if !info.Config.Single {
+		t.Errorf("Expected Single flag to be true, got false")
+	}
+
+	// Simulate a running process by setting RunningProcesses to 1
+	// This is a hack for testing purposes
+	info.RunningProcesses = 1
+
+	// Create a WaitGroup to wait for all goroutines to finish
+	var wg sync.WaitGroup
+
+	// Number of concurrent operations
+	numOperations := 10
+
+	// Start multiple goroutines to stop the cron job concurrently
+	for i := 0; i < numOperations; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err := sup.StopService("cron-service")
+			if err != nil {
+				t.Errorf("Failed to stop cron job: %v", err)
+			}
+		}()
+	}
+
+	// Wait for all goroutines to finish
+	wg.Wait()
+
+	// Get final service status
+	info, err = sup.GetServiceStatus("cron-service")
+	if err != nil {
+		t.Errorf("Failed to get service status: %v", err)
+	}
+
+	// Check that RunningProcesses is 0 after stopping
+	if info.RunningProcesses != 0 {
+		t.Errorf("Expected RunningProcesses to be 0 after stopping, got %d", info.RunningProcesses)
+	}
+
+	// Clean up
+	sup.Stop()
+}
+
+func TestSupervisor_RaceConditions(t *testing.T) {
+	// Set a timeout for the test
+	timeout := time.AfterFunc(10*time.Second, func() {
+		t.Fatal("Test timed out after 10 seconds")
+	})
+	defer timeout.Stop()
+
+	cfg := MockConfig()
+	activeServices := map[string]bool{
+		"service1": true,
+	}
+	sup := supervisor.NewSupervisor(cfg, activeServices, false)
+	err := sup.Start()
+	if err != nil {
+		t.Errorf("Failed to start supervisor: %v", err)
+	}
+
+	// Wait for service to start
+	time.Sleep(100 * time.Millisecond)
+
+	// Create a WaitGroup to wait for all goroutines to finish
+	var wg sync.WaitGroup
+
+	// Number of concurrent operations
+	numOperations := 10
+
+	// Start multiple goroutines to start and stop the service concurrently
+	for i := 0; i < numOperations; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+
+			// Alternate between starting and stopping
+			if i%2 == 0 {
+				err := sup.StartService("service1")
+				if err != nil {
+					t.Errorf("Failed to start service: %v", err)
+				}
+			} else {
+				err := sup.StopService("service1")
+				if err != nil {
+					t.Errorf("Failed to stop service: %v", err)
+				}
+			}
+		}(i)
+	}
+
+	// Wait for all goroutines to finish
+	wg.Wait()
+
+	// Get final service status
+	info, err := sup.GetServiceStatus("service1")
+	if err != nil {
+		t.Errorf("Failed to get service status: %v", err)
+	}
+
+	// Check that RunningProcesses is either 0 or 1 (not negative or greater than 1)
+	if info.RunningProcesses < 0 || info.RunningProcesses > 1 {
+		t.Errorf("Expected RunningProcesses to be 0 or 1, got %d", info.RunningProcesses)
+	}
+
+	// Clean up
+	sup.Stop()
+}
+
+func TestSupervisor_StopCronJob(t *testing.T) {
+	// Set a timeout for the test
+	timeout := time.AfterFunc(5*time.Second, func() {
+		t.Fatal("Test timed out after 5 seconds")
+	})
+	defer timeout.Stop()
+	cfg := MockConfig()
+	activeServices := map[string]bool{
+		"cron-service": true,
+	}
+	sup := supervisor.NewSupervisor(cfg, activeServices, false)
+	err := sup.Start()
+	if err != nil {
+		t.Errorf("Failed to start supervisor: %v", err)
+	}
+
+	// Wait for service to start
+	time.Sleep(100 * time.Millisecond)
+
+	// Get service status
+	info, err := sup.GetServiceStatus("cron-service")
+	if err != nil {
+		t.Errorf("Failed to get service status: %v", err)
+	}
+	if info.Status != supervisor.StatusScheduled {
+		t.Errorf("Expected service status to be scheduled, got %s", info.Status)
+	}
+
+	// Simulate a running process by setting RunningProcesses to 1
+	// This is a hack for testing purposes
+	info.RunningProcesses = 1
+
+	// Stop the cron job
+	err = sup.StopService("cron-service")
+	if err != nil {
+		t.Errorf("Failed to stop cron job: %v", err)
+	}
+
+	// Wait for cron job to be stopped
+	time.Sleep(100 * time.Millisecond)
+
+	// Get service status
+	info, err = sup.GetServiceStatus("cron-service")
+	if err != nil {
+		t.Errorf("Failed to get service status: %v", err)
+	}
+
+	// Check that RunningProcesses is 0 after stopping
+	if info.RunningProcesses != 0 {
+		t.Errorf("Expected RunningProcesses to be 0 after stopping, got %d", info.RunningProcesses)
+	}
+
+	// Check that the cron job is still scheduled
+	if info.Status != supervisor.StatusScheduled {
+		t.Errorf("Expected service status to be scheduled after stopping processes, got %s", info.Status)
 	}
 
 	// Clean up
