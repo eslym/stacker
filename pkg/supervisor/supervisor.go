@@ -86,6 +86,7 @@ func NewSupervisor(cfg *config.Config, activeServices map[string]bool, verbose b
 	}
 
 	// Start resource usage monitoring
+	sup.wg.Add(1)
 	go sup.monitorResourceUsage()
 
 	return sup
@@ -98,6 +99,8 @@ func (s *Supervisor) SetLoggerProvider(provider LoggerProvider) {
 
 // monitorResourceUsage periodically updates resource usage information for running services
 func (s *Supervisor) monitorResourceUsage() {
+	defer s.wg.Done()
+
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
@@ -265,14 +268,25 @@ func (s *Supervisor) Stop() {
 		close(done)
 	}()
 
-	// Wait with timeout (30 seconds should be enough for most services)
+	// Get grace period from config
+	graceDuration := 5 * time.Second // Default grace period
+	if s.config.Grace != "" {
+		if parsedGrace, err := time.ParseDuration(s.config.Grace); err == nil {
+			graceDuration = parsedGrace
+		}
+	}
+
+	// Wait with timeout based on configured grace period
 	select {
 	case <-done:
 		if s.verbose {
-			log.Printf("All services stopped successfully")
+			log.Printf("All services and background goroutines stopped successfully")
 		}
-	case <-time.After(30 * time.Second):
+	case <-time.After(graceDuration):
 		log.Printf("WARNING: Timeout waiting for services to stop, forcing shutdown")
+		// Force all goroutines to terminate by returning from the function
+		// This will cause the program to exit if this is the main goroutine
+		return
 	}
 
 	// Wait for cron jobs to finish with timeout
@@ -285,8 +299,11 @@ func (s *Supervisor) Stop() {
 		if s.verbose {
 			log.Printf("All cron jobs finished successfully")
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(graceDuration):
 		log.Printf("WARNING: Timeout waiting for cron jobs to finish, forcing shutdown")
+		// Force all goroutines to terminate by returning from the function
+		// This will cause the program to exit if this is the main goroutine
+		return
 	}
 
 	if s.verbose {

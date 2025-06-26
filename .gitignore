@@ -99,3 +99,4 @@ tramp
 # Project specific
 # Add any project-specific patterns here
 stacker
+test-config.yaml
