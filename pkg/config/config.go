@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -48,19 +47,6 @@ type Config struct {
 	Grace    string             `json:"grace,omitempty" yaml:"grace,omitempty"`
 	Admin    interface{}        `json:"admin,omitempty" yaml:"admin,omitempty"`
 	Services map[string]Process `json:"services" yaml:"services"`
-}
-
-// GetDefaultConfigPath returns the default config path based on the OS
-func GetDefaultConfigPath() string {
-	// OS-specific default paths
-	switch runtime.GOOS {
-	case "windows":
-		return "C:\\ProgramData\\Stacker\\config"
-	case "darwin":
-		return "/Library/Application Support/Stacker/config"
-	default: // linux and others
-		return "/usr/local/etc/stacker/config"
-	}
 }
 
 // FindConfigFile tries to find a config file in multiple locations
