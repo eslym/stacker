@@ -9,6 +9,14 @@ jobs:
   docker:
     name: Build and Push Docker Images
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        distro: [debian, alpine]
+        include:
+          - distro: debian
+            is_default: true
+          - distro: alpine
+            is_default: false
 
     steps:
       - name: Checkout code
@@ -26,51 +34,43 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Extract Debian metadata
-        id: meta-debian
+      - name: Prepare tags
+        id: tags
+        run: |
+          echo "TAGS<<EOF" >> $GITHUB_ENV
+
+          # Add distribution-specific tags
+          echo "type=semver,pattern={{version}}-${{ matrix.distro }}" >> $GITHUB_ENV
+          echo "type=semver,pattern={{major}}.{{minor}}-${{ matrix.distro }}" >> $GITHUB_ENV
+          echo "type=semver,pattern={{major}}-${{ matrix.distro }}" >> $GITHUB_ENV
+          echo "${{ matrix.distro }}" >> $GITHUB_ENV
+          echo "latest-${{ matrix.distro }}" >> $GITHUB_ENV
+
+          # Add default tags (without distribution suffix) only for the default distribution
+          if [ "${{ matrix.is_default }}" = "true" ]; then
+            echo "type=semver,pattern={{version}}" >> $GITHUB_ENV
+            echo "type=semver,pattern={{major}}.{{minor}}" >> $GITHUB_ENV
+            echo "type=semver,pattern={{major}}" >> $GITHUB_ENV
+            echo "latest" >> $GITHUB_ENV
+          fi
+
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Extract metadata
+        id: meta
         uses: docker/metadata-action@v5
         with:
           images: eslym/stacker
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=semver,pattern={{version}}-debian
-            type=semver,pattern={{major}}.{{minor}}-debian
-            type=semver,pattern={{major}}-debian
-            latest
+          tags: ${{ env.TAGS }}
 
-      - name: Extract Alpine metadata
-        id: meta-alpine
-        uses: docker/metadata-action@v5
-        with:
-          images: eslym/stacker
-          tags: |
-            type=semver,pattern={{version}}-alpine
-            type=semver,pattern={{major}}.{{minor}}-alpine
-            type=semver,pattern={{major}}-alpine
-            latest-alpine
-
-      # Build and push Debian image for both x64 and arm64
-      - name: Build and push Debian image
+      # Build and push image for both x64 and arm64
+      - name: Build and push ${{ matrix.distro }} image
         uses: docker/build-push-action@v5
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           build-args: |
-            DISTRO=debian
+            DISTRO=${{ matrix.distro }}
           push: true
-          tags: ${{ steps.meta-debian.outputs.tags }}
-          labels: ${{ steps.meta-debian.outputs.labels }}
-
-      # Build and push Alpine image for both x64 and arm64
-      - name: Build and push Alpine image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          build-args: |
-            DISTRO=alpine
-          push: true
-          tags: ${{ steps.meta-alpine.outputs.tags }}
-          labels: ${{ steps.meta-alpine.outputs.labels }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
