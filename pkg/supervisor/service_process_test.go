@@ -62,7 +62,6 @@ func TestProcessBasicLifecycle(t *testing.T) {
 
 	// Check stdout
 	found := false
-	close(stdout)
 	for line := range stdout {
 		if strings.Contains(line, "hello") {
 			found = true

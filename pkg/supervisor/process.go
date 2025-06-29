@@ -170,6 +170,18 @@ func (sp *supervisedProcess) Start() error {
 		sp.started = false
 		sp.cmd = nil
 		atomic.StoreInt32(&sp.running, 0)
+		// Close all stdout listeners
+		for _, ch := range sp.stdout {
+			close(ch)
+		}
+		// Close all stderr listeners
+		for _, ch := range sp.stderr {
+			close(ch)
+		}
+		// Close all exit listeners
+		for _, ch := range sp.exit {
+			close(ch)
+		}
 		sp.mu.Unlock()
 		close(exitCleanup)
 		close(sp.done)
