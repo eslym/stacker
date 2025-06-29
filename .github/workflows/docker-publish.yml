@@ -9,6 +9,8 @@ jobs:
   docker:
     name: Build, Extract Binary, and Release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     strategy:
       matrix:
         distro: [debian, alpine]
