@@ -46,26 +46,12 @@ func NewProcessService(config *config.ServiceEntry) ProcessService {
 		return nil
 	}
 
-	// Create a new process
-	process := NewProcess(config.Command[0], config.Command[1:])
-
-	// Set working directory if specified
-	if config.WorkingDir != "" {
-		process.(*supervisedProcess).WorkDir = config.WorkingDir
-	}
-
-	// Set environment variables if specified
-	if len(config.Env) > 0 {
-		process.(*supervisedProcess).Env = config.Env
-	}
-
-	// Create the service
+	// Create the service struct first to get the context
 	service := &processService{
 		name:            "", // Will be set by the caller
 		restartPolicy:   NewRestartPolicy(config.Restart),
 		retries:         0,
 		lastExitCode:    0,
-		process:         process,
 		userStopped:     false,
 		grace:           config.GracePeriod,
 		verbose:         true, // Default to verbose logging
@@ -73,10 +59,18 @@ func NewProcessService(config *config.ServiceEntry) ProcessService {
 		stdoutListeners: []chan string{},
 		stderrListeners: []chan string{},
 	}
+	// Now create the process with the service context
+	cfg := ProcessConfig{
+		Path:    config.Command[0],
+		Args:    config.Command[1:],
+		WorkDir: config.WorkingDir,
+		Env:     config.Env,
+	}
+	service.process = NewProcess(service.ctx, cfg)
 
 	// Attach a single handler to process output
-	process.OnStdout(makeProcessServiceOutputHandler(service, "STDOUT"))
-	process.OnStderr(makeProcessServiceOutputHandler(service, "STDERR"))
+	service.process.OnStdout(makeProcessServiceOutputHandler(service, "STDOUT"))
+	service.process.OnStderr(makeProcessServiceOutputHandler(service, "STDERR"))
 
 	go service.watchForExit()
 
@@ -160,6 +154,12 @@ func (p *processService) Start() error {
 	if err != nil {
 		return fmt.Errorf("failed to start process: %w", err)
 	}
+	if p.verbose {
+		log.Printf(
+			"supervisor", "service %s process started, pid: %d, cmd: %s %v",
+			p.name, p.process.GetPid(), p.process.GetPath(), p.process.GetArgs(),
+		)
+	}
 	return nil
 }
 
@@ -219,21 +219,7 @@ func (p *processService) Restart() error {
 	// Release the lock before calling Start to avoid deadlock
 	p.mu.Unlock()
 
-	// Always create a new process instance for restart
-	p.mu.Lock()
-	cmd := p.process.(*supervisedProcess).Path
-	args := p.process.(*supervisedProcess).Args
-	workDir := p.process.(*supervisedProcess).WorkDir
-	env := p.process.(*supervisedProcess).Env
-	p.process = NewProcess(cmd, args)
-	if workDir != "" {
-		p.process.(*supervisedProcess).WorkDir = workDir
-	}
-	if len(env) > 0 {
-		p.process.(*supervisedProcess).Env = env
-	}
-	p.mu.Unlock()
-
+	// Just call Start, do not recreate the Process object
 	return p.Start()
 }
 

@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,13 @@ import (
 var ErrProcessRunning = errors.New("process already started")
 var ErrProcessNotRunning = errors.New("process not running")
 var ErrStopProcessTimeout = errors.New("unable to stop process")
+
+type ProcessConfig struct {
+	Path    string
+	Args    []string
+	WorkDir string
+	Env     map[string]string
+}
 
 type Process interface {
 	Start() error
@@ -30,17 +38,17 @@ type Process interface {
 	OffStdout(listener chan string)
 	OffStderr(listener chan string)
 	OffExit(listener chan int)
+
+	GetPath() string
+	GetArgs() []string
+	GetWorkDir() string
+	GetEnv() map[string]string
+	GetPid() int
 }
 
 type supervisedProcess struct {
-	Path string
-	Args []string
-
-	WorkDir string
-	Env     map[string]string
-
-	mu sync.Mutex
-
+	config  ProcessConfig
+	mu      sync.Mutex
 	stdout  []chan string
 	stderr  []chan string
 	exit    []chan int
@@ -51,17 +59,20 @@ type supervisedProcess struct {
 	done    chan struct{}
 
 	running int32 // atomic flag: 1 if running, 0 if not
+
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
-func NewProcess(path string, args []string) Process {
+func NewProcess(ctx context.Context, cfg ProcessConfig) Process {
 	sp := &supervisedProcess{
-		Path:    path,
-		Args:    args,
+		config:  cfg,
 		stdout:  []chan string{},
 		stderr:  []chan string{},
 		exit:    []chan int{},
 		cleanup: make([]chan struct{}, 0),
 		done:    make(chan struct{}),
+		ctx:     ctx,
 	}
 	return sp
 }
@@ -76,16 +87,16 @@ func (sp *supervisedProcess) Start() error {
 		sp.mu.Unlock()
 		return fmt.Errorf("%w", ErrProcessRunning)
 	}
-	sp.cmd = exec.Command(sp.Path, sp.Args...)
+	sp.cmd = exec.Command(sp.config.Path, sp.config.Args...)
 	sp.cmd.SysProcAttr = &sysProcAttr
 
-	if sp.WorkDir != "" {
-		sp.cmd.Dir = sp.WorkDir
+	if sp.config.WorkDir != "" {
+		sp.cmd.Dir = sp.config.WorkDir
 	}
 
-	if len(sp.Env) > 0 {
+	if len(sp.config.Env) > 0 {
 		env := os.Environ()
-		for k, v := range sp.Env {
+		for k, v := range sp.config.Env {
 			env = append(env, k+"="+v)
 		}
 		sp.cmd.Env = env
@@ -119,11 +130,11 @@ func (sp *supervisedProcess) Start() error {
 	sp.cleanup = append(sp.cleanup, stdoutCleanup, stderrCleanup, exitCleanup)
 	sp.mu.Unlock()
 
-	go sp.readPipe(stdoutPipe, func(line string) {
+	go sp.readPipeWithContext(stdoutPipe, func(line string) {
 		sp.mu.Lock()
 		listenerCount := len(sp.stdout)
 		if listenerCount > 1 {
-			fmt.Fprintf(os.Stderr, "[debug] process %s: %d stdout listeners\n", sp.Path, listenerCount)
+			fmt.Fprintf(os.Stderr, "[debug] process %s: %d stdout listeners\n", sp.config.Path, listenerCount)
 		}
 		for _, ch := range sp.stdout {
 			select {
@@ -132,19 +143,13 @@ func (sp *supervisedProcess) Start() error {
 			}
 		}
 		sp.mu.Unlock()
-	}, stdoutCleanup, func() {
-		sp.mu.Lock()
-		for _, ch := range sp.stdout {
-			close(ch)
-		}
-		sp.mu.Unlock()
-	})
+	}, stdoutCleanup)
 
-	go sp.readPipe(stderrPipe, func(line string) {
+	go sp.readPipeWithContext(stderrPipe, func(line string) {
 		sp.mu.Lock()
 		listenerCount := len(sp.stderr)
 		if listenerCount > 1 {
-			fmt.Fprintf(os.Stderr, "[debug] process %s: %d stderr listeners\n", sp.Path, listenerCount)
+			fmt.Fprintf(os.Stderr, "[debug] process %s: %d stderr listeners\n", sp.config.Path, listenerCount)
 		}
 		for _, ch := range sp.stderr {
 			select {
@@ -153,59 +158,50 @@ func (sp *supervisedProcess) Start() error {
 			}
 		}
 		sp.mu.Unlock()
-	}, stderrCleanup, func() {
-		sp.mu.Lock()
-		for _, ch := range sp.stderr {
-			close(ch)
-		}
-		sp.mu.Unlock()
-	})
+	}, stderrCleanup)
 
 	go func() {
-		err := sp.cmd.Wait()
-		if err != nil {
-			var exitErr *exec.ExitError
-			if errors.As(err, &exitErr) {
-				// exitCode := exitErr.ExitCode() // not used
-			} else {
-				// exitCode = -1 // not used
+		defer close(exitCleanup)
+		defer close(sp.done)
+		select {
+		case <-sp.ctx.Done():
+			return
+		default:
+			err := sp.cmd.Wait()
+			if err != nil {
+				var exitErr *exec.ExitError
+				_ = exitErr // not used
 			}
-		}
-		sp.mu.Lock()
-		for _, ch := range sp.exit {
-			select {
-			case ch <- 0: // always send 0 for now
-			default:
+			sp.mu.Lock()
+			for _, ch := range sp.exit {
+				select {
+				case ch <- 0: // always send 0 for now
+				default:
+				}
 			}
+			sp.started = false
+			sp.cmd = nil
+			atomic.StoreInt32(&sp.running, 0)
+			sp.mu.Unlock()
 		}
-		sp.started = false
-		sp.cmd = nil
-		atomic.StoreInt32(&sp.running, 0)
-		// Close all exit listeners
-		for _, ch := range sp.exit {
-			close(ch)
-		}
-		sp.mu.Unlock()
-		close(exitCleanup)
-		close(sp.done)
 	}()
 
 	return nil
 }
 
-func (sp *supervisedProcess) readPipe(pipe io.ReadCloser, send func(string), cleanup chan struct{}, onClose func()) {
+func (sp *supervisedProcess) readPipeWithContext(pipe io.ReadCloser, send func(string), cleanup chan struct{}) {
 	scanner := bufio.NewScanner(pipe)
 	for {
 		select {
+		case <-sp.ctx.Done():
+			return
 		case <-cleanup:
-			onClose()
 			return
 		default:
 			if scanner.Scan() {
 				line := scanner.Text()
 				send(line)
 			} else {
-				onClose()
 				return
 			}
 		}
@@ -240,13 +236,17 @@ func (sp *supervisedProcess) Stop(timeout time.Duration) error {
 
 func (sp *supervisedProcess) Kill() error {
 	sp.mu.Lock()
-	if !sp.started || sp.cmd == nil || sp.cmd.Process == nil {
+	if !sp.started || sp.cmd == nil || sp.cmd.Process == nil || sp.ctx == nil {
 		sp.mu.Unlock()
 		return fmt.Errorf("%w", ErrProcessNotRunning)
 	}
 	proc := sp.cmd.Process
 	done := sp.done
 	sp.mu.Unlock()
+
+	if sp.cancel != nil {
+		sp.cancel() // cancel context to cleanup goroutines
+	}
 
 	err := proc.Kill()
 	<-done
@@ -268,6 +268,9 @@ func (sp *supervisedProcess) postCleanup() {
 	sp.started = false
 	sp.cmd = nil
 	atomic.StoreInt32(&sp.running, 0)
+	if sp.cancel != nil {
+		sp.cancel()
+	}
 }
 
 // ForceCleanup forcibly resets the process state (for test/restart recovery)
@@ -339,4 +342,29 @@ func (sp *supervisedProcess) OffExit(listener chan int) {
 		}
 	}
 	sp.mu.Unlock()
+}
+
+func (sp *supervisedProcess) GetPath() string {
+	return sp.config.Path
+}
+
+func (sp *supervisedProcess) GetArgs() []string {
+	return sp.config.Args
+}
+
+func (sp *supervisedProcess) GetWorkDir() string {
+	return sp.config.WorkDir
+}
+
+func (sp *supervisedProcess) GetEnv() map[string]string {
+	return sp.config.Env
+}
+
+func (sp *supervisedProcess) GetPid() int {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	if sp.cmd != nil && sp.cmd.Process != nil {
+		return sp.cmd.Process.Pid
+	}
+	return 0
 }

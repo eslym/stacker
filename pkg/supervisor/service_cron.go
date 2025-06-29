@@ -1,6 +1,7 @@
 package supervisor
 
 import (
+	"context"
 	"maps"
 	"slices"
 	"sync"
@@ -31,6 +32,7 @@ type cronService struct {
 	mu sync.Mutex
 
 	forwardingStopChans []chan struct{}
+	ctx                 context.Context
 }
 
 // NewCronService creates a new CronService from a config.ServiceEntry
@@ -48,6 +50,7 @@ func NewCronService(config *config.ServiceEntry, scheduler *gronx.Gronx) CronSer
 		return nil
 	}
 
+	ctx := context.Background()
 	// Create the service
 	service := &cronService{
 		name:                "", // Will be set by the caller
@@ -62,6 +65,7 @@ func NewCronService(config *config.ServiceEntry, scheduler *gronx.Gronx) CronSer
 		scheduler:           scheduler,
 		verbose:             true, // Default to verbose logging
 		forwardingStopChans: []chan struct{}{},
+		ctx:                 ctx,
 	}
 
 	return service
@@ -284,7 +288,6 @@ func (c *cronService) Run(t time.Time) {
 	enabled := c.enabled
 	single := c.single
 	processCount := len(c.processes)
-	command := append([]string{}, c.command...)
 	workDir := c.workDir
 	env := map[string]string{}
 	maps.Copy(env, c.env)
@@ -313,29 +316,23 @@ func (c *cronService) Run(t time.Time) {
 				log.Printf("supervisor", "skipping cron job %s (already running)", name)
 			}
 			return
-		} else if verbose {
-			log.Printf("supervisor", "running cron job %s: %v", name, command)
 		}
 
-		if len(command) == 0 {
-			if verbose {
-				log.Errorf("supervisor", "cron job %s has no command", name)
-			}
-			return
-		}
+		command := append([]string{}, c.command...)
 
-		process := NewProcess(command[0], command[1:])
-		if workDir != "" {
-			process.(*supervisedProcess).WorkDir = workDir
+		cfg := ProcessConfig{
+			Path:    command[0],
+			Args:    command[1:],
+			WorkDir: workDir,
+			Env:     env,
 		}
-		if len(env) > 0 {
-			process.(*supervisedProcess).Env = env
-		}
+		
+		process := NewProcess(c.ctx, cfg)
 		c.addProcess(process)
 		if err := process.Start(); err != nil {
 			log.Errorf("supervisor", "failed to start cron job %s: %s", name, err)
 			return
 		}
-		log.Printf("supervisor", "cron job %s process started, pid: %v", name, process.(*supervisedProcess).cmd.Process.Pid)
+		log.Printf("supervisor", "cron job %s process started, pid: %v, cmd: %v", name, process.GetPid(), command)
 	}
 }

@@ -1,6 +1,7 @@
 package supervisor
 
 import (
+	"context"
 	"runtime"
 	"strings"
 	"sync"
@@ -23,8 +24,11 @@ func testEchoCmd(msg string) (string, []string) {
 }
 
 func TestProcessBasicLifecycle(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
 	path, args := testEchoCmd("hello")
-	proc := NewProcess(path, args)
+	cfg := ProcessConfig{Path: path, Args: args}
+	proc := NewProcess(ctx, cfg)
 
 	stdout := make(chan string, 10)
 	stderr := make(chan string, 10)
@@ -52,7 +56,7 @@ func TestProcessBasicLifecycle(t *testing.T) {
 		if code != 0 {
 			t.Errorf("unexpected exit code: %d", code)
 		}
-	case <-time.After(2 * time.Second):
+	case <-ctx.Done():
 		t.Fatal("timeout waiting for process exit")
 	}
 
@@ -60,12 +64,15 @@ func TestProcessBasicLifecycle(t *testing.T) {
 		t.Error("process should not be running after exit")
 	}
 
-	// Check stdout
+	// Check stdout (non-blocking)
 	found := false
-	for line := range stdout {
+	select {
+	case line := <-stdout:
 		if strings.Contains(line, "hello") {
 			found = true
 		}
+	case <-time.After(500 * time.Millisecond):
+		
 	}
 	if !found {
 		t.Error("did not receive expected stdout")
@@ -73,8 +80,11 @@ func TestProcessBasicLifecycle(t *testing.T) {
 }
 
 func TestProcessDoubleStart(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
 	path, args := testSleepCmd()
-	proc := NewProcess(path, args)
+	cfg := ProcessConfig{Path: path, Args: args}
+	proc := NewProcess(ctx, cfg)
 	if err := proc.Start(); err != nil {
 		t.Fatalf("failed to start process: %v", err)
 	}
@@ -82,12 +92,17 @@ func TestProcessDoubleStart(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error on double Start")
 	}
-	_ = proc.Kill()
+	if proc.IsRunning() {
+		_ = proc.Kill()
+	}
 }
 
 func TestProcessStopAndKill(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
 	path, args := testSleepCmd()
-	proc := NewProcess(path, args)
+	cfg := ProcessConfig{Path: path, Args: args}
+	proc := NewProcess(ctx, cfg)
 	if err := proc.Start(); err != nil {
 		t.Fatalf("failed to start process: %v", err)
 	}
@@ -101,8 +116,11 @@ func TestProcessStopAndKill(t *testing.T) {
 }
 
 func TestProcessKillNotRunning(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
 	path, args := testSleepCmd()
-	proc := NewProcess(path, args)
+	cfg := ProcessConfig{Path: path, Args: args}
+	proc := NewProcess(ctx, cfg)
 	err := proc.Kill()
 	if err == nil {
 		t.Fatal("expected error on Kill when not running")
@@ -110,8 +128,11 @@ func TestProcessKillNotRunning(t *testing.T) {
 }
 
 func TestProcessRaceConditions(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
 	path, args := testSleepCmd()
-	proc := NewProcess(path, args)
+	cfg := ProcessConfig{Path: path, Args: args}
+	proc := NewProcess(ctx, cfg)
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
@@ -124,8 +145,11 @@ func TestProcessRaceConditions(t *testing.T) {
 }
 
 func TestProcessGoroutineCleanup(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
 	path, args := testSleepCmd()
-	proc := NewProcess(path, args)
+	cfg := ProcessConfig{Path: path, Args: args}
+	proc := NewProcess(ctx, cfg)
 	if err := proc.Start(); err != nil {
 		t.Fatalf("failed to start process: %v", err)
 	}
