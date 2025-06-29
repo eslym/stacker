@@ -81,10 +81,16 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
+      # Set image tag variable for extraction steps
+      - name: Set image tag variable
+        id: set_tag
+        run: |
+          echo "tag=$(echo '${{ steps.meta.outputs.tags }}' | head -n1)" >> $GITHUB_OUTPUT
+
       # Extract binary from built image
       - name: Create container from image
         run: |
-          docker create --name extract_container ${{ steps.meta.outputs.tags[0] }}
+          docker create --name extract_container ${{ steps.set_tag.outputs.tag }}
 
       - name: Copy binary from container
         run: |
@@ -97,7 +103,7 @@ jobs:
       # Extract amd64 binary from built image
       - name: Create amd64 container from image
         run: |
-          docker create --platform linux/amd64 --name extract_container_amd64 ${{ steps.meta.outputs.tags[0] }}
+          docker create --platform linux/amd64 --name extract_container_amd64 ${{ steps.set_tag.outputs.tag }}
 
       - name: Copy amd64 binary from container
         run: |
@@ -110,7 +116,7 @@ jobs:
       # Extract arm64 binary from built image
       - name: Create arm64 container from image
         run: |
-          docker create --platform linux/arm64 --name extract_container_arm64 ${{ steps.meta.outputs.tags[0] }}
+          docker create --platform linux/arm64 --name extract_container_arm64 ${{ steps.set_tag.outputs.tag }}
 
       - name: Copy arm64 binary from container
         run: |
