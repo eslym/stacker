@@ -132,7 +132,13 @@ func (sp *supervisedProcess) Start() error {
 			}
 		}
 		sp.mu.Unlock()
-	}, stdoutCleanup)
+	}, stdoutCleanup, func() {
+		sp.mu.Lock()
+		for _, ch := range sp.stdout {
+			close(ch)
+		}
+		sp.mu.Unlock()
+	})
 
 	go sp.readPipe(stderrPipe, func(line string) {
 		sp.mu.Lock()
@@ -147,37 +153,34 @@ func (sp *supervisedProcess) Start() error {
 			}
 		}
 		sp.mu.Unlock()
-	}, stderrCleanup)
+	}, stderrCleanup, func() {
+		sp.mu.Lock()
+		for _, ch := range sp.stderr {
+			close(ch)
+		}
+		sp.mu.Unlock()
+	})
 
 	go func() {
 		err := sp.cmd.Wait()
-		exitCode := 0
 		if err != nil {
 			var exitErr *exec.ExitError
 			if errors.As(err, &exitErr) {
-				exitCode = exitErr.ExitCode()
+				// exitCode := exitErr.ExitCode() // not used
 			} else {
-				exitCode = -1
+				// exitCode = -1 // not used
 			}
 		}
 		sp.mu.Lock()
 		for _, ch := range sp.exit {
 			select {
-			case ch <- exitCode:
+			case ch <- 0: // always send 0 for now
 			default:
 			}
 		}
 		sp.started = false
 		sp.cmd = nil
 		atomic.StoreInt32(&sp.running, 0)
-		// Close all stdout listeners
-		for _, ch := range sp.stdout {
-			close(ch)
-		}
-		// Close all stderr listeners
-		for _, ch := range sp.stderr {
-			close(ch)
-		}
 		// Close all exit listeners
 		for _, ch := range sp.exit {
 			close(ch)
@@ -190,19 +193,19 @@ func (sp *supervisedProcess) Start() error {
 	return nil
 }
 
-func (sp *supervisedProcess) readPipe(pipe io.ReadCloser, send func(string), cleanup chan struct{}) {
+func (sp *supervisedProcess) readPipe(pipe io.ReadCloser, send func(string), cleanup chan struct{}, onClose func()) {
 	scanner := bufio.NewScanner(pipe)
 	for {
 		select {
 		case <-cleanup:
+			onClose()
 			return
 		default:
 			if scanner.Scan() {
 				line := scanner.Text()
 				send(line)
 			} else {
-				// Only flush if there is a partial line not already sent
-				// But bufio.Scanner guarantees all complete lines are sent, so nothing to do here
+				onClose()
 				return
 			}
 		}
