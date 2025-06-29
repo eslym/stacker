@@ -1,177 +1,164 @@
 package main
 
 import (
-	"fmt"
-	"io"
-	"log"
+	"bytes"
+	"context"
+	"encoding/json"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 
+	"github.com/adhocore/gronx"
 	"github.com/eslym/stacker/pkg/admin"
 	"github.com/eslym/stacker/pkg/cli"
 	"github.com/eslym/stacker/pkg/config"
+	"github.com/eslym/stacker/pkg/log"
 	"github.com/eslym/stacker/pkg/supervisor"
 	"gopkg.in/yaml.v3"
 )
 
-// ServiceLoggerProvider implements the supervisor.LoggerProvider interface
-type ServiceLoggerProvider struct {
-	adminServer *admin.AdminServer
-}
-
-// GetLogger returns a logger for the specified service
-func (p *ServiceLoggerProvider) GetLogger(serviceName string) io.Writer {
-	return NewServiceLogger(serviceName, p.adminServer)
-}
-
-// ServiceLogger is a custom logger that prepends timestamp and service name to each line of output
-type ServiceLogger struct {
-	serviceName string
-	adminServer *admin.AdminServer
-}
-
-// Write implements io.Writer interface
-func (l *ServiceLogger) Write(p []byte) (n int, err error) {
-	// Split output by lines
-	lines := strings.Split(string(p), "\n")
-
-	for _, line := range lines {
-		if line == "" {
-			continue
-		}
-
-		// Prepend timestamp and service name
-		timestamp := time.Now().Format("2006-01-02 15:04:05")
-		formattedLine := fmt.Sprintf("[%s] [%s] %s", timestamp, l.serviceName, line)
-
-		// Write to stdout
-		fmt.Println(formattedLine)
-
-		// Send to admin interface if available
-		if l.adminServer != nil {
-			l.adminServer.BroadcastLog(l.serviceName, line)
-		}
-	}
-
-	return len(p), nil
-}
-
-// NewServiceLogger creates a new service logger
-func NewServiceLogger(serviceName string, adminServer *admin.AdminServer) *ServiceLogger {
-	return &ServiceLogger{
-		serviceName: serviceName,
-		adminServer: adminServer,
-	}
-}
-
 func main() {
-	fmt.Println("Stacker - Service Supervisor")
-
 	// Parse command-line arguments
 	options, err := cli.ParseArgs(os.Args[1:])
 	if err != nil {
-		log.Fatalf("Error parsing arguments: %v", err)
+		log.Errorf("main", "Error: %s", err)
+		os.Exit(1)
 	}
 
-	// Load configuration
-	cfg, err := config.LoadConfig(options.ConfigPath)
-	if err != nil {
-		log.Fatalf("Error loading configuration: %v", err)
-	}
-
-	// Log the normalized config if verbose flag is enabled
-	if options.Verbose {
-		fmt.Println("Normalized configuration:")
-		// Create a normalized config with inherited values explicitly set
-		normalizedCfg := config.NormalizeConfig(cfg)
-		if cfgYaml, err := yaml.Marshal(normalizedCfg); err == nil {
-			fmt.Println(string(cfgYaml))
-		} else {
-			log.Printf("Error marshaling config to YAML: %v", err)
+	// Resolve config path
+	configPath := options.ConfigPath
+	if configPath == "" {
+		configPath, err = config.ResolveConfigPath("stacker.json", "stacker.yaml", "stacker.yml")
+		if err != nil {
+			log.Errorf("main", "Error: %s", err)
+			os.Exit(1)
 		}
 	}
 
-	// Determine which services to run
+	// Load config file
+	configData, err := os.ReadFile(configPath)
+	if err != nil {
+		log.Errorf("main", "Error reading config file: %s", err)
+		os.Exit(1)
+	}
+
+	// Parse config file
+	var data any
+	if len(configData) > 0 {
+		ext := strings.ToLower(filepath.Ext(configPath))
+		if ext == ".yaml" || ext == ".yml" {
+			if err := yaml.Unmarshal(configData, &data); err != nil {
+				log.Errorf("main", "Error parsing YAML config: %s", err)
+				os.Exit(1)
+			}
+		} else {
+			if err := json.Unmarshal(configData, &data); err != nil {
+				log.Errorf("main", "Error parsing JSON config: %s", err)
+				os.Exit(1)
+			}
+		}
+	}
+
+	// Create cron parser
+	gron := gronx.New()
+
+	configDir := filepath.Dir(configPath)
+
+	// Deserialize config
+	cfg, err := config.DeserializeConfig(data, func(env string) string {
+		if env == "configDir" {
+			return configDir
+		}
+		return os.Getenv(env)
+	}, gron)
+	if err != nil {
+		log.Errorf("main", "Error deserializing config: %s", err)
+		os.Exit(1)
+	}
+
+	if options.Verbose {
+		var buffer bytes.Buffer
+		encoder := yaml.NewEncoder(&buffer)
+		encoder.SetIndent(2)
+		if err := encoder.Encode(cfg.Serialize()); err != nil {
+			log.Errorf("main", "Error encoding config to YAML: %s", err)
+			os.Exit(1)
+		}
+		_ = encoder.Close()
+		log.Printf("main", "Loaded configuration from %s\n%s", configPath, buffer.String())
+	}
+
+	// Get available services
 	availableServices := make(map[string]bool)
 	optionalServices := make(map[string]bool)
-	for name, service := range cfg.Services {
+	for name, entry := range cfg.Services {
 		availableServices[name] = true
-		if service.Optional {
+		if entry.Optional {
 			optionalServices[name] = true
 		}
 	}
 
-	activeServices, err := cli.GetServiceSelection(options, availableServices, optionalServices)
+	// Determine which services to run
+	serviceSelection, err := cli.GetServiceSelection(options, availableServices, optionalServices)
 	if err != nil {
-		log.Fatalf("Error selecting services: %v", err)
+		log.Errorf("main", "Error: %s", err)
+		os.Exit(1)
 	}
 
-	// Initialize supervisor
-	sup := supervisor.NewSupervisor(cfg, activeServices, options.Verbose)
-
-	// Initialize admin interface
-	adminServer := admin.NewAdminServer(cfg, sup)
-
-	// Create logger provider
-	loggerProvider := &ServiceLoggerProvider{
-		adminServer: adminServer,
+	if len(serviceSelection) == 0 {
+		log.Errorf("main", "No services selected to run. Please specify services using --service or --all.")
+		os.Exit(1)
 	}
 
-	// Set logger provider on supervisor
-	sup.SetLoggerProvider(loggerProvider)
+	if options.Verbose {
+		log.Printf("main", "Selected services: %v", serviceSelection)
+	}
+
+	// Create supervisor
+	sup, err := supervisor.CreateSupervisorFromConfig(cfg, serviceSelection, options.Verbose)
+	if err != nil {
+		log.Errorf("main", "Error creating supervisor: %s", err)
+		os.Exit(1)
+	}
 
 	// Start supervisor
 	if err := sup.Start(); err != nil {
-		log.Fatalf("Error starting supervisor: %v", err)
+		log.Errorf("main", "Error starting supervisor: %s", err)
+		os.Exit(1)
 	}
 
-	// Start admin interface
-	if err := adminServer.Start(); err != nil {
-		log.Printf("Error starting admin server: %v", err)
+	// Start admin HTTP interface if enabled
+	var adminServer interface{ Stop() error }
+	if cfg.Admin != nil {
+		// Use a background context for admin, but you may want to use supervisor's context if available
+		adminSrv := admin.NewAdminServer(context.Background(), sup, cfg.Admin)
+		if err := adminSrv.Start(); err != nil {
+			log.Errorf("main", "Error starting admin HTTP server: %s", err)
+			os.Exit(1)
+		}
+		adminServer = adminSrv
 	}
 
-	// Use timestamp in log message
-	timestamp := time.Now().Format("2006-01-02 15:04:05")
-	fmt.Printf("[%s] [stacker] Stacker started successfully\n", timestamp)
-
-	// Handle signals for graceful shutdown
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	// Set up signal handling for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	// Wait for signal
-	<-sigCh
-	// Use timestamp in log message
-	shutdownTimestamp := time.Now().Format("2006-01-02 15:04:05")
-	fmt.Printf("[%s] [stacker] Shutting down...\n", shutdownTimestamp)
+	sig := <-sigChan
+	log.Printf("main", "Received signal %s, shutting down...", sig)
 
-	// Create a channel to signal when shutdown is complete
-	shutdownComplete := make(chan struct{})
-
-	// Start the shutdown process in a goroutine
-	go func() {
-		// Stop admin interface
-		if err := adminServer.Stop(); err != nil {
-			log.Printf("Error stopping admin server: %v", err)
-		}
-
-		// Stop supervisor
-		sup.Stop()
-
-		close(shutdownComplete)
-	}()
-
-	// Wait for shutdown to complete with a timeout
-	select {
-	case <-shutdownComplete:
-		// Shutdown completed normally
-	case <-time.After(60 * time.Second):
-		log.Printf("WARNING: Shutdown timed out after 60 seconds, forcing exit")
+	// Stop supervisor
+	if err := sup.Stop(); err != nil {
+		log.Errorf("main", "Error stopping supervisor: %s", err)
+		os.Exit(1)
 	}
 
-	// Use timestamp in log message
-	completeTimestamp := time.Now().Format("2006-01-02 15:04:05")
-	fmt.Printf("[%s] [stacker] Shutdown complete\n", completeTimestamp)
+	// Stop admin HTTP server if running
+	if adminServer != nil {
+		_ = adminServer.Stop()
+	}
+
+	log.Printf("main", "Shutdown complete")
 }

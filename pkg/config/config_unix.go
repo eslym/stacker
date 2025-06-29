@@ -2,7 +2,10 @@
 
 package config
 
-// GetDefaultConfigPath returns the default config path for Linux and other Unix-like systems
-func GetDefaultConfigPath() string {
-	return "/usr/local/etc/stacker/config"
+func getResolutionPath() []string {
+	paths := getBaseResolutionPath()
+
+	paths = append(paths, "/etc/stacker")
+
+	return paths
 }

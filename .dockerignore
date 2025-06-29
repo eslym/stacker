@@ -1,0 +1,8 @@
+# Ignore files not needed in the Docker build context
+.git
+.gitignore
+*.md
+*.log
+test-config.yaml
+**/testdata/
+**/*_test.go

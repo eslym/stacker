@@ -4,437 +4,269 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
-	"sync"
-	"time"
+	"strconv"
+	"strings"
 
 	"github.com/eslym/stacker/pkg/config"
+	"github.com/eslym/stacker/pkg/log"
 	"github.com/eslym/stacker/pkg/supervisor"
+	"golang.org/x/net/websocket"
 )
 
-// ClientInfo represents information about a connected client
-type ClientInfo struct {
-	Channel chan []byte
-	Filter  string
+// adminServer holds the HTTP server and supervisor reference
+type adminServer struct {
+	sup     supervisor.Supervisor
+	config  *config.AdminEntry
+	server  *http.Server
+	ctx     context.Context
+	cancel  context.CancelFunc
+	verbose bool
 }
 
-// SupervisorInterface defines the methods required by the AdminServer
-type SupervisorInterface interface {
-	GetServiceStatus(name string) (*supervisor.ServiceInfo, error)
-	GetAllServiceStatuses() map[string]*supervisor.ServiceInfo
-	StartService(name string) error
-	StopService(name string) error
-	RestartService(name string) error
-	EnableCronJob(name string) error
-	DisableCronJob(name string) error
+type Server interface {
+	Start() error
+	Stop() error
 }
 
-// AdminServer represents the HTTP admin interface
-type AdminServer struct {
-	supervisor SupervisorInterface
-	config     *config.Config
-	server     *http.Server
-	clients    map[string]*ClientInfo
-	mu         sync.RWMutex
-}
-
-// NewAdminServer creates a new admin server
-func NewAdminServer(cfg *config.Config, sup SupervisorInterface) *AdminServer {
-	return &AdminServer{
-		supervisor: sup,
-		config:     cfg,
-		clients:    make(map[string]*ClientInfo),
+// NewAdminServer creates a new admin HTTP server
+func NewAdminServer(ctx context.Context, sup supervisor.Supervisor, adminCfg *config.AdminEntry) Server {
+	ctx, cancel := context.WithCancel(ctx)
+	return &adminServer{
+		sup:     sup,
+		config:  adminCfg,
+		ctx:     ctx,
+		cancel:  cancel,
+		verbose: true, // Set to true for verbose logging; could be configurable
 	}
 }
 
-// Start starts the admin server
-func (a *AdminServer) Start() error {
-	if a.config.Admin == nil {
-		return nil
-	}
-
-	// Create router
+// Start launches the HTTP admin server (goroutine)
+func (a *adminServer) Start() error {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/services", a.handleServices)
+	mux.HandleFunc("/service/", a.handleService)
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		if a.verbose {
+			log.Printf("admin", "healthz endpoint hit from %s", r.RemoteAddr)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	mux.Handle("/ws/service/", websocket.Handler(a.handleServiceLogsWS))
 
-	// Register endpoints
-	mux.HandleFunc("/api/services", a.handleServices)
-	mux.HandleFunc("/api/services/", a.handleService)
-	mux.HandleFunc("/api/logs", a.handleLogs)
-
-	// Create server
 	a.server = &http.Server{
 		Handler: mux,
 	}
 
-	// Start server
+	addr := ""
+	if a.config.Unix != "" {
+		ln, err := net.Listen("unix", a.config.Unix)
+		if err != nil {
+			return err
+		}
+		go func() {
+			_ = a.server.Serve(ln)
+		}()
+		addr = "unix:" + a.config.Unix
+	} else {
+		host := a.config.Host
+		if host == "" {
+			host = "localhost"
+		}
+		port := a.config.Port
+		if port == 0 {
+			port = 8080
+		}
+		addr = net.JoinHostPort(host, strconv.Itoa(port))
+		a.server.Addr = addr
+		go func() {
+			_ = a.server.ListenAndServe()
+		}()
+	}
+	if a.verbose {
+		log.Printf("admin", "Admin HTTP server started at %s", addr)
+	} else {
+		fmt.Printf("Admin HTTP server started at %s\n", addr)
+	}
+
 	go func() {
-		var err error
-
-		switch admin := a.config.Admin.(type) {
-		case map[string]interface{}:
-			// Check for host/port configuration
-			if host, ok := admin["host"].(string); ok {
-				if port, ok := admin["port"].(float64); ok {
-					addr := fmt.Sprintf("%s:%d", host, int(port))
-					log.Printf("Starting admin server on %s", addr)
-					a.server.Addr = addr
-					err = a.server.ListenAndServe()
-				}
-			} else if sock, ok := admin["sock"].(string); ok {
-				// Unix socket (Linux only)
-				log.Printf("Starting admin server on unix socket %s", sock)
-				listener, listenErr := net.Listen("unix", sock)
-				if listenErr != nil {
-					log.Printf("Failed to listen on unix socket: %v", listenErr)
-					return
-				}
-				err = a.server.Serve(listener)
-			}
+		<-a.ctx.Done()
+		if a.verbose {
+			log.Printf("admin", "Shutting down admin HTTP server")
 		}
-
-		if err != nil && err != http.ErrServerClosed {
-			log.Printf("Admin server error: %v", err)
-		}
+		_ = a.server.Close()
 	}()
 
 	return nil
 }
 
-// Stop stops the admin server
-func (a *AdminServer) Stop() error {
-	if a.server == nil {
-		return nil
+// Stop gracefully shuts down the admin server
+func (a *adminServer) Stop() error {
+	if a.verbose {
+		log.Printf("admin", "Stop called on admin HTTP server")
 	}
-
-	// Close all client connections
-	a.mu.Lock()
-	for id, clientInfo := range a.clients {
-		close(clientInfo.Channel)
-		delete(a.clients, id)
+	if a.cancel != nil {
+		a.cancel()
 	}
-	a.mu.Unlock()
-
-	// Create a context with timeout for graceful shutdown
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	// Shutdown the server gracefully
-	err := a.server.Shutdown(ctx)
-	if err != nil {
-		// If shutdown times out or fails, force close
-		log.Printf("Admin server graceful shutdown failed: %v, forcing close", err)
+	if a.server != nil {
 		return a.server.Close()
 	}
-
 	return nil
 }
 
-// handleServices handles requests to /api/services
-func (a *AdminServer) handleServices(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		// Get all service statuses
-		statuses := a.supervisor.GetAllServiceStatuses()
-
-		// Convert to JSON-friendly format
-		result := make(map[string]interface{})
-		for name, info := range statuses {
-			result[name] = a.formatServiceInfo(info)
-		}
-
-		a.respondJSON(w, result)
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+// handleServices returns all services and their stats
+func (a *adminServer) handleServices(w http.ResponseWriter, r *http.Request) {
+	if a.verbose {
+		log.Printf("admin", "GET /services from %s", r.RemoteAddr)
 	}
+	services := a.sup.GetAllServices()
+	stats := make(map[string]any)
+	for name, svc := range services {
+		stats[name] = svc.GetSerializedStats()
+	}
+	writeJSON(w, stats)
 }
 
-// handleService handles requests to /api/services/{name}
-func (a *AdminServer) handleService(w http.ResponseWriter, r *http.Request) {
-	// Extract service name from URL
-	name := r.URL.Path[len("/api/services/"):]
-	if name == "" {
-		http.Error(w, "Service name required", http.StatusBadRequest)
+// handleService handles actions for a single service
+func (a *adminServer) handleService(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/service/"), "/")
+	if len(parts) < 1 || parts[0] == "" {
+		http.Error(w, "missing service name", http.StatusBadRequest)
+		if a.verbose {
+			log.Printf("admin", "Bad request to /service/ (missing name) from %s", r.RemoteAddr)
+		}
 		return
 	}
-
-	switch r.Method {
-	case http.MethodGet:
-		// Get service status
-		info, err := a.supervisor.GetServiceStatus(name)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
-			return
-		}
-
-		a.respondJSON(w, a.formatServiceInfo(info))
-	case http.MethodPost:
-		// Parse action
-		var action struct {
-			Action string `json:"action"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&action); err != nil {
-			http.Error(w, "Invalid request body", http.StatusBadRequest)
-			return
-		}
-
-		// Get service info to check if it's a cron job
-		info, err := a.supervisor.GetServiceStatus(name)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
-			return
-		}
-
-		// Check if it's a cron job
-		isCronJob := info.Config.Cron != ""
-
-		// Handle action based on service type
-		switch action.Action {
-		case "start":
-			if isCronJob {
-				err = fmt.Errorf("start is not applicable for cron job %s, use enable instead", name)
-			} else {
-				err = a.supervisor.StartService(name)
-			}
-		case "stop":
-			// Stop is applicable to both regular services and cron jobs
-			err = a.supervisor.StopService(name)
-		case "restart":
-			if isCronJob {
-				err = fmt.Errorf("restart is not applicable for cron job %s", name)
-			} else {
-				err = a.supervisor.RestartService(name)
-			}
-		case "enable":
-			if isCronJob {
-				err = a.supervisor.EnableCronJob(name)
-			} else {
-				err = fmt.Errorf("enable is not applicable for regular service %s, use start instead", name)
-			}
-		case "disable":
-			if isCronJob {
-				err = a.supervisor.DisableCronJob(name)
-			} else {
-				err = fmt.Errorf("disable is not applicable for regular service %s, use stop instead", name)
-			}
-		default:
-			http.Error(w, "Invalid action", http.StatusBadRequest)
-			return
-		}
-
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		// Get updated status
-		info, err = a.supervisor.GetServiceStatus(name)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		a.respondJSON(w, a.formatServiceInfo(info))
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-// handleLogs handles requests to /api/logs
-func (a *AdminServer) handleLogs(w http.ResponseWriter, r *http.Request) {
-	// Set headers for SSE
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-
-	// Get service filter from query parameters
-	serviceFilter := r.URL.Query().Get("service")
-
-	// Create a channel for this client
-	clientID := fmt.Sprintf("%d", time.Now().UnixNano())
-	messageCh := make(chan []byte, 100)
-
-	// Create client info
-	clientInfo := &ClientInfo{
-		Channel: messageCh,
-		Filter:  serviceFilter,
-	}
-
-	// Register client
-	a.mu.Lock()
-	a.clients[clientID] = clientInfo
-	a.mu.Unlock()
-
-	// Clean up when the client disconnects
-	defer func() {
-		a.mu.Lock()
-		delete(a.clients, clientID)
-		close(messageCh)
-		a.mu.Unlock()
-	}()
-
-	// Send messages to client
-	flusher, ok := w.(http.Flusher)
+	name := parts[0]
+	svc, ok := a.sup.GetService(name)
 	if !ok {
-		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+		http.Error(w, "service not found", http.StatusNotFound)
+		if a.verbose {
+			log.Printf("admin", "Service %s not found for %s", name, r.RemoteAddr)
+		}
 		return
 	}
 
-	// Log connection
-	log.Printf("Client connected to log stream with filter: %s", serviceFilter)
+	if len(parts) == 1 && r.Method == http.MethodGet {
+		if a.verbose {
+			log.Printf("admin", "GET /service/%s from %s", name, r.RemoteAddr)
+		}
+		writeJSON(w, svc.GetSerializedStats())
+		return
+	}
 
-	// Keep the connection open
+	if len(parts) == 2 && r.Method == http.MethodPost {
+		action := parts[1]
+		var err error
+		if a.verbose {
+			log.Printf("admin", "POST /service/%s/%s from %s", name, action, r.RemoteAddr)
+		}
+		switch action {
+		case "start":
+			err = a.sup.StartService(name)
+		case "stop":
+			err = a.sup.StopService(name)
+		case "restart":
+			err = a.sup.RestartService(name)
+		default:
+			http.Error(w, "unknown action", http.StatusBadRequest)
+			if a.verbose {
+				log.Printf("admin", "Unknown action %s for service %s from %s", action, name, r.RemoteAddr)
+			}
+			return
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			if a.verbose {
+				log.Printf("admin", "Error performing %s on %s: %v", action, name, err)
+			}
+			return
+		}
+		writeJSON(w, map[string]string{"status": "ok"})
+		return
+	}
+
+	http.Error(w, "invalid request", http.StatusBadRequest)
+	if a.verbose {
+		log.Printf("admin", "Invalid request to /service/%s from %s", name, r.RemoteAddr)
+	}
+}
+
+// handleServiceLogsWS streams live logs for a service over WebSocket
+func (a *adminServer) handleServiceLogsWS(ws *websocket.Conn) {
+	if a.verbose {
+		log.Printf("admin", "WebSocket logs connection from %s to %s", ws.Request().RemoteAddr, ws.Request().URL.Path)
+	}
+	defer func(ws *websocket.Conn) {
+		if a.verbose {
+			log.Printf("admin", "WebSocket logs connection closed for %s", ws.Request().RemoteAddr)
+		}
+		_ = ws.Close()
+	}(ws)
+	parts := strings.Split(strings.TrimPrefix(ws.Request().URL.Path, "/ws/service/"), "/")
+	if len(parts) < 2 || parts[1] != "logs" {
+		_ = websocket.Message.Send(ws, "invalid path")
+		if a.verbose {
+			log.Printf("admin", "Invalid WebSocket logs path: %s", ws.Request().URL.Path)
+		}
+		return
+	}
+	name := parts[0]
+	svc, ok := a.sup.GetService(name)
+	if !ok {
+		_ = websocket.Message.Send(ws, "service not found")
+		if a.verbose {
+			log.Printf("admin", "WebSocket logs: service %s not found", name)
+		}
+		return
+	}
+
+	stdout := make(chan string, 100)
+	stderr := make(chan string, 100)
+	svc.OnStdout(stdout)
+	svc.OnStderr(stderr)
+	defer svc.OffStdout(stdout)
+	defer svc.OffStderr(stderr)
+
+	type logMsg struct {
+		Stream string `json:"stream"`
+		Line   string `json:"line"`
+	}
+
 	for {
 		select {
-		case msg, ok := <-clientInfo.Channel:
+		case line, ok := <-stdout:
 			if !ok {
 				return
 			}
-			fmt.Fprintf(w, "data: %s\n\n", msg)
-			flusher.Flush()
-		case <-r.Context().Done():
-			return
+			msg, _ := json.Marshal(logMsg{Stream: "stdout", Line: line})
+			if err := websocket.Message.Send(ws, string(msg)); err != nil {
+				if a.verbose {
+					log.Printf("admin", "WebSocket send error (stdout): %v", err)
+				}
+				return
+			}
+		case line, ok := <-stderr:
+			if !ok {
+				return
+			}
+			msg, _ := json.Marshal(logMsg{Stream: "stderr", Line: line})
+			if err := websocket.Message.Send(ws, string(msg)); err != nil {
+				if a.verbose {
+					log.Printf("admin", "WebSocket send error (stderr): %v", err)
+				}
+				return
+			}
 		}
 	}
 }
 
-// BroadcastLog broadcasts a log message to all connected clients
-func (a *AdminServer) BroadcastLog(service, message string) {
-	// Create log message
-	logMsg := struct {
-		Timestamp string `json:"timestamp"`
-		Service   string `json:"service"`
-		Message   string `json:"message"`
-	}{
-		Timestamp: time.Now().Format(time.RFC3339),
-		Service:   service,
-		Message:   message,
-	}
-
-	// Convert to JSON
-	data, err := json.Marshal(logMsg)
-	if err != nil {
-		log.Printf("Failed to marshal log message: %v", err)
-		return
-	}
-
-	// Send to all clients
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-
-	for _, clientInfo := range a.clients {
-		// Apply service filter if specified
-		if clientInfo.Filter != "" && clientInfo.Filter != service {
-			continue
-		}
-
-		select {
-		case clientInfo.Channel <- data:
-			// Message sent
-		default:
-			// Channel full, skip
-		}
-	}
-}
-
-// formatServiceInfo formats service info for JSON response
-func (a *AdminServer) formatServiceInfo(info *supervisor.ServiceInfo) map[string]interface{} {
-	result := map[string]interface{}{
-		"name":             info.Name,
-		"status":           string(info.Status),
-		"pid":              info.Pid,
-		"restartCount":     info.RestartCount,
-		"exitCode":         info.ExitCode,
-		"runningProcesses": info.RunningProcesses,
-	}
-
-	if !info.StartTime.IsZero() {
-		result["startTime"] = info.StartTime.Format(time.RFC3339)
-		result["uptime"] = info.Uptime.String()
-	}
-
-	if !info.NextRestart.IsZero() {
-		result["nextRestart"] = info.NextRestart.Format(time.RFC3339)
-	}
-
-	if !info.NextRun.IsZero() {
-		result["nextRun"] = info.NextRun.Format(time.RFC3339)
-	}
-
-	if info.Error != "" {
-		result["error"] = info.Error
-	}
-
-	// Add resource usage information
-	if info.Status == supervisor.StatusRunning && !info.LastUpdated.IsZero() {
-		result["resourceUsage"] = map[string]interface{}{
-			"cpuPercent":  info.CpuPercent,
-			"memoryUsage": formatBytes(info.MemoryUsage),
-			"lastUpdated": info.LastUpdated.Format(time.RFC3339),
-		}
-	}
-
-	// Add available actions based on service type
-	isCronJob := info.Config.Cron != ""
-	actions := make(map[string]interface{})
-
-	if isCronJob {
-		// Cron job actions
-		actions["enable"] = map[string]interface{}{
-			"description": "Enable the cron job",
-			"applicable":  info.Status != supervisor.StatusScheduled,
-		}
-		actions["disable"] = map[string]interface{}{
-			"description": "Disable the cron job without stopping processes",
-			"applicable":  info.Status == supervisor.StatusScheduled,
-		}
-		actions["stop"] = map[string]interface{}{
-			"description": "Stop all running processes",
-			"applicable":  info.RunningProcesses > 0,
-		}
-	} else {
-		// Regular service actions
-		actions["start"] = map[string]interface{}{
-			"description": "Start the service",
-			"applicable":  info.Status != supervisor.StatusRunning,
-		}
-		actions["stop"] = map[string]interface{}{
-			"description": "Stop the service",
-			"applicable":  info.Status == supervisor.StatusRunning,
-		}
-		actions["restart"] = map[string]interface{}{
-			"description": "Restart the service",
-			"applicable":  true,
-		}
-	}
-
-	result["actions"] = actions
-	result["isCronJob"] = isCronJob
-
-	return result
-}
-
-// formatBytes formats bytes to a human-readable string
-func formatBytes(bytes int64) string {
-	const unit = 1024
-	if bytes < unit {
-		return fmt.Sprintf("%d B", bytes)
-	}
-	div, exp := int64(unit), 0
-	for n := bytes / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
-}
-
-// respondJSON sends a JSON response
-func (a *AdminServer) respondJSON(w http.ResponseWriter, data interface{}) {
+// writeJSON writes JSON response
+func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(data); err != nil {
-		log.Printf("Failed to encode JSON response: %v", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(v)
 }

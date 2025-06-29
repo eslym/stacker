@@ -25,7 +25,7 @@ func ParseArgs(args []string) (*Options, error) {
 	// Create a custom flag set
 	fs := flag.NewFlagSet("stacker", flag.ContinueOnError)
 
- // Define flags
+	// Define flags
 	fs.StringVar(&options.ConfigPath, "config", "", "Path to config file (JSON or YAML)")
 	fs.StringVar(&options.ConfigPath, "c", "", "Path to config file (JSON or YAML) (shorthand)")
 
