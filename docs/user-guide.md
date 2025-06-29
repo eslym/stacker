@@ -36,7 +36,7 @@ For Docker-specific usage, see [docs/docker.md](docker.md).
 ## Configuration
 - YAML or JSON
 - Search order: STACKER_CONFIG_PATH, current dir, user config dir, OS-specific defaults
-- Example config and options documented
+- Example config and options documented in [docs/configuration.md](configuration.md)
 
 ### Example Configuration (YAML)
 ```yaml
