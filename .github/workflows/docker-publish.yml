@@ -94,7 +94,7 @@ jobs:
 
       - name: Copy binary from container
         run: |
-          docker cp extract_container:/app/stacker ./stacker-${{ matrix.distro }}
+          docker cp extract_container:/usr/local/bin/stacker ./stacker-${{ matrix.type }}
 
       - name: Remove container
         run: |
@@ -107,7 +107,7 @@ jobs:
 
       - name: Copy amd64 binary from container
         run: |
-          docker cp extract_container_amd64:/app/stacker ./stacker-${{ matrix.distro }}-amd64
+          docker cp extract_container_amd64:/usr/local/bin/stacker ./stacker-${{ matrix.type }}-amd64
 
       - name: Remove amd64 container
         run: |
@@ -120,7 +120,7 @@ jobs:
 
       - name: Copy arm64 binary from container
         run: |
-          docker cp extract_container_arm64:/app/stacker ./stacker-${{ matrix.distro }}-arm64
+          docker cp extract_container_arm64:/usr/local/bin/stacker ./stacker-${{ matrix.type }}-arm64
 
       - name: Remove arm64 container
         run: |
@@ -128,11 +128,11 @@ jobs:
 
       - name: Archive amd64 binary
         run: |
-          tar czvf stacker-${{ matrix.distro }}-amd64.tar.gz stacker-${{ matrix.distro }}-amd64
+          tar czvf stacker-${{ matrix.type }}-amd64.tar.gz stacker-${{ matrix.type }}-amd64
 
       - name: Archive arm64 binary
         run: |
-          tar czvf stacker-${{ matrix.distro }}-arm64.tar.gz stacker-${{ matrix.distro }}-arm64
+          tar czvf stacker-${{ matrix.type }}-arm64.tar.gz stacker-${{ matrix.type }}-arm64
 
       - name: Upload Release Asset (amd64)
         uses: softprops/action-gh-release@v2
