@@ -1,4 +1,4 @@
-name: Docker Build and Publish
+name: Docker Build, Extract Binary, and Release
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
 
 jobs:
   docker:
-    name: Build and Push Docker Images
+    name: Build, Extract Binary, and Release
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -15,8 +15,10 @@ jobs:
         include:
           - distro: debian
             is_default: true
+            type: glibc
           - distro: alpine
             is_default: false
+            type: musl
 
     steps:
       - name: Checkout code
@@ -37,31 +39,33 @@ jobs:
       - name: Prepare tags
         id: tags
         run: |
-          echo "TAGS<<EOF" >> $GITHUB_ENV
-
+          TAGS=""
           # Add distribution-specific tags
-          echo "type=semver,pattern={{version}}-${{ matrix.distro }}" >> $GITHUB_ENV
-          echo "type=semver,pattern={{major}}.{{minor}}-${{ matrix.distro }}" >> $GITHUB_ENV
-          echo "type=semver,pattern={{major}}-${{ matrix.distro }}" >> $GITHUB_ENV
-          echo "${{ matrix.distro }}" >> $GITHUB_ENV
-          echo "latest-${{ matrix.distro }}" >> $GITHUB_ENV
+          TAGS+="type=semver,pattern={{version}}-${{ matrix.distro }}\n"
+          TAGS+="type=semver,pattern={{major}}.{{minor}}-${{ matrix.distro }}\n"
+          TAGS+="type=semver,pattern={{major}}-${{ matrix.distro }}\n"
+          TAGS+="${{ matrix.distro }}\n"
+          TAGS+="latest-${{ matrix.distro }}\n"
 
           # Add default tags (without distribution suffix) only for the default distribution
           if [ "${{ matrix.is_default }}" = "true" ]; then
-            echo "type=semver,pattern={{version}}" >> $GITHUB_ENV
-            echo "type=semver,pattern={{major}}.{{minor}}" >> $GITHUB_ENV
-            echo "type=semver,pattern={{major}}" >> $GITHUB_ENV
-            echo "latest" >> $GITHUB_ENV
+            TAGS+="type=semver,pattern={{version}}\n"
+            TAGS+="type=semver,pattern={{major}}.{{minor}}\n"
+            TAGS+="type=semver,pattern={{major}}\n"
+            TAGS+="latest\n"
           fi
 
-          echo "EOF" >> $GITHUB_ENV
+          # Remove trailing newline and set output
+          echo "tags<<EOF" >> $GITHUB_OUTPUT
+          echo -n "$TAGS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: eslym/stacker
-          tags: ${{ env.TAGS }}
+          tags: ${{ steps.tags.outputs.tags }}
 
       # Build and push image for both x64 and arm64
       - name: Build and push ${{ matrix.distro }} image
@@ -74,3 +78,62 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      # Extract binary from built image
+      - name: Create container from image
+        run: |
+          docker create --name extract_container ${{ steps.meta.outputs.tags[0] }}
+
+      - name: Copy binary from container
+        run: |
+          docker cp extract_container:/app/stacker ./stacker-${{ matrix.distro }}
+
+      - name: Remove container
+        run: |
+          docker rm extract_container
+
+      # Extract amd64 binary from built image
+      - name: Create amd64 container from image
+        run: |
+          docker create --platform linux/amd64 --name extract_container_amd64 ${{ steps.meta.outputs.tags[0] }}
+
+      - name: Copy amd64 binary from container
+        run: |
+          docker cp extract_container_amd64:/app/stacker ./stacker-${{ matrix.distro }}-amd64
+
+      - name: Remove amd64 container
+        run: |
+          docker rm extract_container_amd64
+
+      # Extract arm64 binary from built image
+      - name: Create arm64 container from image
+        run: |
+          docker create --platform linux/arm64 --name extract_container_arm64 ${{ steps.meta.outputs.tags[0] }}
+
+      - name: Copy arm64 binary from container
+        run: |
+          docker cp extract_container_arm64:/app/stacker ./stacker-${{ matrix.distro }}-arm64
+
+      - name: Remove arm64 container
+        run: |
+          docker rm extract_container_arm64
+
+      - name: Archive amd64 binary
+        run: |
+          tar czvf stacker-${{ matrix.distro }}-amd64.tar.gz stacker-${{ matrix.distro }}-amd64
+
+      - name: Archive arm64 binary
+        run: |
+          tar czvf stacker-${{ matrix.distro }}-arm64.tar.gz stacker-${{ matrix.distro }}-arm64
+
+      - name: Upload Release Asset (amd64)
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: stacker-${{ matrix.type }}-amd64.tar.gz
+
+      - name: Upload Release Asset (arm64)
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: stacker-${{ matrix.type }}-arm64.tar.gz
