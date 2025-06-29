@@ -55,10 +55,12 @@ jobs:
             TAGS+="latest\n"
           fi
 
-          # Remove trailing newline and set output
-          echo "tags<<EOF" >> $GITHUB_OUTPUT
-          echo -n "$TAGS" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          # Output tags using correct multi-line syntax
+          {
+            echo "tags<<EOF"
+            echo -e "$TAGS"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
 
       - name: Extract metadata
         id: meta
