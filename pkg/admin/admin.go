@@ -51,6 +51,7 @@ func NewAdminServer(ctx context.Context, sup supervisor.Supervisor, adminCfg *co
 func (a *adminServer) registerHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/services", a.handleServices)
 	mux.HandleFunc("/service/", a.handleService)
+	mux.HandleFunc("/process/", a.handleProcess) // New: process-level API
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if a.verbose {
 			log.Printf("admin", "healthz endpoint hit from %s", r.RemoteAddr)
@@ -59,6 +60,7 @@ func (a *adminServer) registerHandlers(mux *http.ServeMux) {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.Handle("/ws/service/", websocket.Handler(a.handleServiceLogsWS))
+	mux.Handle("/ws/process/", websocket.Handler(a.handleProcessLogsWS)) // New: process-level logs
 }
 
 // Start launches the HTTP admin server (goroutine)
@@ -198,10 +200,65 @@ func (a *adminServer) handleService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Add resource usage endpoint: /service/{name}/resource
+	if len(parts) == 2 && parts[1] == "resource" && r.Method == http.MethodGet {
+		cpuSum := 0.0
+		memSum := uint64(0)
+		memPercentSum := float32(0)
+		count := 0
+		for _, proc := range svc.ListProcesses() {
+			if stats, err := proc.GetResourceStats(); err == nil {
+				cpuSum += stats.CPUPercent
+				memSum += stats.MemoryRSS
+				memPercentSum += stats.MemoryPercent
+				count++
+			}
+		}
+		writeJSON(w, map[string]any{
+			"resource": map[string]any{
+				"cpu_percent":    cpuSum,
+				"memory_rss":     memSum,
+				"memory_percent": memPercentSum,
+				"process_count":  count,
+			},
+		})
+		return
+	}
+
 	http.Error(w, "invalid request", http.StatusBadRequest)
 	if a.verbose {
 		log.Printf("admin", "Invalid request to /service/%s from %s", name, r.RemoteAddr)
 	}
+}
+
+// handleProcess returns process info and resource stats by process ID
+func (a *adminServer) handleProcess(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/process/"), "/")
+	if len(parts) < 1 || parts[0] == "" {
+		http.Error(w, "missing process id", http.StatusBadRequest)
+		return
+	}
+	pid := parts[0]
+	// Search all services for this process
+	for _, svc := range a.sup.GetAllServices() {
+		if proc, ok := svc.GetProcessByID(pid); ok {
+			stats := map[string]any{
+				"id":      proc.GetID(),
+				"pid":     proc.GetPid(),
+				"path":    proc.GetPath(),
+				"args":    proc.GetArgs(),
+				"workDir": proc.GetWorkDir(),
+				"env":     proc.GetEnv(),
+				"running": proc.IsRunning(),
+			}
+			if res, err := proc.GetResourceStats(); err == nil {
+				stats["resource"] = res
+			}
+			writeJSON(w, stats)
+			return
+		}
+	}
+	http.Error(w, "process not found", http.StatusNotFound)
 }
 
 // handleServiceLogsWS streams live logs for a service over WebSocket
@@ -269,6 +326,59 @@ func (a *adminServer) handleServiceLogsWS(ws *websocket.Conn) {
 				if a.verbose {
 					log.Printf("admin", "WebSocket send error (stderr): %v", err)
 				}
+				return
+			}
+		}
+	}
+}
+
+// handleProcessLogsWS streams logs for a specific process by ID
+func (a *adminServer) handleProcessLogsWS(ws *websocket.Conn) {
+	parts := strings.Split(strings.TrimPrefix(ws.Request().URL.Path, "/ws/process/"), "/")
+	if len(parts) < 2 || parts[1] != "logs" {
+		_ = websocket.Message.Send(ws, "invalid path")
+		ws.Close()
+		return
+	}
+	pid := parts[0]
+	var proc supervisor.Process
+	for _, svc := range a.sup.GetAllServices() {
+		if p, ok := svc.GetProcessByID(pid); ok {
+			proc = p
+			break
+		}
+	}
+	if proc == nil {
+		_ = websocket.Message.Send(ws, "process not found")
+		ws.Close()
+		return
+	}
+	stdout := make(chan string, 100)
+	stderr := make(chan string, 100)
+	proc.OnStdout(stdout)
+	proc.OnStderr(stderr)
+	defer proc.OffStdout(stdout)
+	defer proc.OffStderr(stderr)
+	type logMsg struct {
+		Stream string `json:"stream"`
+		Line   string `json:"line"`
+	}
+	for {
+		select {
+		case line, ok := <-stdout:
+			if !ok {
+				return
+			}
+			msg, _ := json.Marshal(logMsg{Stream: "stdout", Line: line})
+			if err := websocket.Message.Send(ws, string(msg)); err != nil {
+				return
+			}
+		case line, ok := <-stderr:
+			if !ok {
+				return
+			}
+			msg, _ := json.Marshal(logMsg{Stream: "stderr", Line: line})
+			if err := websocket.Message.Send(ws, string(msg)); err != nil {
 				return
 			}
 		}

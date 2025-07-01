@@ -11,6 +11,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	gonanoid "github.com/matoous/go-nanoid/v2"
+	"github.com/shirou/gopsutil/v3/process"
 )
 
 var ErrProcessRunning = errors.New("process already started")
@@ -44,6 +47,14 @@ type Process interface {
 	GetWorkDir() string
 	GetEnv() map[string]string
 	GetPid() int
+	GetID() string
+	GetResourceStats() (*ProcessResourceStats, error)
+}
+
+type ProcessResourceStats struct {
+	CPUPercent    float64 `json:"cpu_percent"`
+	MemoryRSS     uint64  `json:"memory_rss"`
+	MemoryPercent float32 `json:"memory_percent"`
 }
 
 type supervisedProcess struct {
@@ -62,9 +73,13 @@ type supervisedProcess struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	id     string
+	psutil *process.Process
 }
 
 func NewProcess(ctx context.Context, cfg ProcessConfig) Process {
+	id, _ := gonanoid.New()
 	sp := &supervisedProcess{
 		config:  cfg,
 		stdout:  []chan string{},
@@ -73,12 +88,17 @@ func NewProcess(ctx context.Context, cfg ProcessConfig) Process {
 		cleanup: make([]chan struct{}, 0),
 		done:    make(chan struct{}),
 		ctx:     ctx,
+		id:      id,
 	}
 	return sp
 }
 
 func (sp *supervisedProcess) IsRunning() bool {
 	return atomic.LoadInt32(&sp.running) == 1
+}
+
+func (sp *supervisedProcess) GetID() string {
+	return sp.id
 }
 
 func (sp *supervisedProcess) Start() error {
@@ -118,6 +138,8 @@ func (sp *supervisedProcess) Start() error {
 		sp.mu.Unlock()
 		return err
 	}
+	// Attach psutil process for resource monitoring
+	sp.psutil, _ = process.NewProcess(int32(sp.cmd.Process.Pid))
 	sp.started = true
 	sp.done = make(chan struct{})
 	atomic.StoreInt32(&sp.running, 1)
@@ -367,4 +389,21 @@ func (sp *supervisedProcess) GetPid() int {
 		return sp.cmd.Process.Pid
 	}
 	return 0
+}
+
+func (sp *supervisedProcess) GetResourceStats() (*ProcessResourceStats, error) {
+	sp.mu.Lock()
+	ps := sp.psutil
+	sp.mu.Unlock()
+	if ps == nil {
+		return nil, fmt.Errorf("psutil process not initialized")
+	}
+	cpu, _ := ps.CPUPercent()
+	mem, _ := ps.MemoryInfo()
+	memPercent, _ := ps.MemoryPercent()
+	return &ProcessResourceStats{
+		CPUPercent:    cpu,
+		MemoryRSS:     mem.RSS,
+		MemoryPercent: memPercent,
+	}, nil
 }

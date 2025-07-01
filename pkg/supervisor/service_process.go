@@ -388,3 +388,18 @@ func (p *processService) OnStderr(listener chan string) {
 	}
 	p.stderrListeners = append(p.stderrListeners, listener)
 }
+
+func (p *processService) ListProcesses() []Process {
+	return []Process{p.process}
+}
+
+func (p *processService) GetProcessByID(id string) (Process, bool) {
+	if p.process.GetID() == id {
+		return p.process, true
+	}
+	return nil, false
+}
+
+func (p *processService) GetProcess() Process {
+	return p.process
+}

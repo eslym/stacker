@@ -44,18 +44,22 @@ func (m *mockService) AsCron() supervisor.CronService       { return nil }
 func (m *mockService) OnStdout(listener chan string) {
 	go func() {
 		listener <- "stdout test log"
-		close(listener)
+		// Do not close immediately; let the handler read it first
 	}()
 }
 func (m *mockService) OnStderr(listener chan string) {
 	go func() {
 		listener <- "stderr test log"
-		close(listener)
+		// Do not close immediately; let the handler read it first
 	}()
 }
-func (m *mockService) OffStdout(listener chan string)     {}
-func (m *mockService) OffStderr(listener chan string)     {}
-func (m *mockService) GetSerializedStats() map[string]any { return m.stats }
+func (m *mockService) OffStdout(listener chan string)      {}
+func (m *mockService) OffStderr(listener chan string)      {}
+func (m *mockService) GetSerializedStats() map[string]any  { return m.stats }
+func (m *mockService) ListProcesses() []supervisor.Process { return nil }
+func (m *mockService) GetProcessByID(id string) (supervisor.Process, bool) {
+	return nil, false
+}
 
 func (m *mockSupervisor) StartService(name string) error   { return nil }
 func (m *mockSupervisor) StopService(name string) error    { return nil }

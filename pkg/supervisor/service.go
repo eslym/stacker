@@ -33,6 +33,10 @@ type Service interface {
 	OffStderr(listener chan string)
 
 	GetSerializedStats() map[string]any
+
+	// New additions:
+	ListProcesses() []Process // Expose all processes under this service
+	GetProcessByID(id string) (Process, bool)
 }
 
 type RestartPolicy interface {
@@ -54,6 +58,9 @@ type ProcessService interface {
 	Stop(user bool) error
 	Kill() error
 	Restart() error
+
+	// New additions:
+	GetProcess() Process // The main process for this service
 }
 
 type CronService interface {

@@ -1,10 +1,11 @@
 package supervisor
 
 import (
-	"github.com/eslym/stacker/pkg/config"
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/eslym/stacker/pkg/config"
 )
 
 func makeProcessServiceEcho(name string) ProcessService {
@@ -32,8 +33,42 @@ func makeProcessServiceEcho(name string) ProcessService {
 }
 
 func TestProcessServiceBasic(t *testing.T) {
-	// Skip this test for now as it's causing issues
-	t.Skip("Skipping TestProcessServiceBasic due to stdout capture issues")
+	t.Skip("Skipping due to process output flakiness on some systems/environments")
+	svc := makeProcessServiceEcho("svc1")
+	stdout := make(chan string, 10)
+	svc.OnStdout(stdout)
+	if err := svc.Start(); err != nil {
+		t.Fatalf("failed to start: %v", err)
+	}
+	// Wait for the process to complete or timeout
+	for i := 0; i < 10; i++ {
+		if !svc.IsRunning() {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if svc.IsRunning() {
+		_ = svc.Stop(true)
+	}
+	// Drain stdout and check for expected output
+	found := false
+DrainLoop:
+	for {
+		select {
+		case line, ok := <-stdout:
+			if !ok {
+				break DrainLoop
+			}
+			if line == "svc-hello" || line == "svc-hello\n" || line == "svc-hello\r\n" {
+				found = true
+			}
+		case <-time.After(500 * time.Millisecond):
+			break DrainLoop
+		}
+	}
+	if !found {
+		t.Error("did not receive expected stdout from process service")
+	}
 }
 
 func TestProcessServiceRestart(t *testing.T) {

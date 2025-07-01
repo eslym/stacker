@@ -10,7 +10,9 @@ Stacker is a robust process supervisor designed for containerized environments. 
 - Conflict Resolution: Automatically manage services that cannot run simultaneously
 - Optional Services: Selectively include or exclude services at runtime
 - Resource Monitoring: Track CPU and memory usage of managed processes
+- Unique Process IDs: Each process is assigned a unique ID for precise management and monitoring
 - HTTP Admin Interface: RESTful API, real-time status, log streaming, filterable output
+- Process-level API: Query and stream logs for individual processes
 - Configuration Flexibility: YAML/JSON
 
 ## Installation
@@ -101,6 +103,105 @@ services:
 ## Admin Interface
 - HTTP endpoints for service management and log streaming
 - Example API endpoints and responses
+
+### Service Endpoints
+- `/services`: List all services and their status
+- `/service/{name}`: Get status for a specific service
+- `/service/{name}/start|stop|restart`: Control a service
+- `/ws/service/{name}/logs`: Stream logs for a service (all processes)
+
+### Process-level Endpoints
+- `/process/{id}`: Get status and resource usage for a specific process (by unique process ID)
+- `/ws/process/{id}/logs`: Stream logs for a specific process
+
+### Service Resource Usage Endpoint
+- `/service/{name}/resource`: Get the total (summed) CPU and memory usage for all processes under a service
+
+#### Example: Get process status
+```sh
+curl http://localhost:8080/process/abc123
+```
+Response:
+```json
+{
+  "id": "abc123",
+  "pid": 12345,
+  "path": "/usr/bin/myapp",
+  "args": ["--foo"],
+  "workDir": "/srv/app",
+  "env": {"FOO": "bar"},
+  "running": true,
+  "resource": {
+    "cpu_percent": 0.5,
+    "memory_rss": 12345678,
+    "memory_percent": 0.1
+  }
+}
+```
+
+#### Example: Stream logs for a process
+Connect to `ws://localhost:8080/ws/process/{id}/logs` using a WebSocket client.
+
+#### Example: Get resource usage for a service
+```sh
+curl http://localhost:8080/service/nginx/resource
+```
+Response:
+```json
+{
+  "cpu_percent": 1.2,
+  "memory_rss": 23456789,
+  "memory_percent": 0.3
+}
+```
+
+### TypeScript API Types
+
+Below are TypeScript type definitions for the main admin interface endpoints:
+
+```ts
+// Resource usage for a process or service
+export interface ResourceStats {
+  cpu_percent: number;
+  memory_rss: number;
+  memory_percent: number;
+  process_count?: number; // Only present for service resource endpoint
+}
+
+// Process status response
+export interface ProcessStatus {
+  id: string;
+  pid: number;
+  path: string;
+  args: string[];
+  workDir: string;
+  env: Record<string, string>;
+  running: boolean;
+  resource: ResourceStats;
+}
+
+// Service resource usage response
+export interface ServiceResourceResponse {
+  resource: ResourceStats;
+}
+
+// Log message from WebSocket endpoints
+export interface LogMessage {
+  stream: 'stdout' | 'stderr';
+  line: string;
+}
+
+// Example: /process/{id}
+// const status: ProcessStatus = await fetch(...)
+
+// Example: /service/{name}/resource
+// const usage: ServiceResourceResponse = await fetch(...)
+
+// Example: WebSocket log usage
+// const msg: LogMessage = JSON.parse(receivedData)
+// msg.stream === 'stdout' // or 'stderr'
+// msg.line // log line content
+```
 
 ## Testing
 - Run tests: `go test ./...`

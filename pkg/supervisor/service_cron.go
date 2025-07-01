@@ -326,7 +326,7 @@ func (c *cronService) Run(t time.Time) {
 			WorkDir: workDir,
 			Env:     env,
 		}
-		
+
 		process := NewProcess(c.ctx, cfg)
 		c.addProcess(process)
 		if err := process.Start(); err != nil {
@@ -335,4 +335,23 @@ func (c *cronService) Run(t time.Time) {
 		}
 		log.Printf("supervisor", "cron job %s process started, pid: %v, cmd: %v", name, process.GetPid(), command)
 	}
+}
+
+// ListProcesses returns a copy of the processes slice
+func (c *cronService) ListProcesses() []Process {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]Process{}, c.processes...)
+}
+
+// GetProcessByID returns a process by its ID
+func (c *cronService) GetProcessByID(id string) (Process, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, p := range c.processes {
+		if p.GetID() == id {
+			return p, true
+		}
+	}
+	return nil, false
 }
