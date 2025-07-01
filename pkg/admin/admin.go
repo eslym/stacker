@@ -31,20 +31,24 @@ type Server interface {
 }
 
 // NewAdminServer creates a new admin HTTP server
-func NewAdminServer(ctx context.Context, sup supervisor.Supervisor, adminCfg *config.AdminEntry) Server {
+// Now accepts a verbose parameter for configurability
+func NewAdminServer(ctx context.Context, sup supervisor.Supervisor, adminCfg *config.AdminEntry, verbose ...bool) Server {
 	ctx, cancel := context.WithCancel(ctx)
+	v := true
+	if len(verbose) > 0 {
+		v = verbose[0]
+	}
 	return &adminServer{
 		sup:     sup,
 		config:  adminCfg,
 		ctx:     ctx,
 		cancel:  cancel,
-		verbose: true, // Set to true for verbose logging; could be configurable
+		verbose: v,
 	}
 }
 
-// Start launches the HTTP admin server (goroutine)
-func (a *adminServer) Start() error {
-	mux := http.NewServeMux()
+// registerHandlers registers all HTTP handlers for the admin server
+func (a *adminServer) registerHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/services", a.handleServices)
 	mux.HandleFunc("/service/", a.handleService)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -55,6 +59,12 @@ func (a *adminServer) Start() error {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.Handle("/ws/service/", websocket.Handler(a.handleServiceLogsWS))
+}
+
+// Start launches the HTTP admin server (goroutine)
+func (a *adminServer) Start() error {
+	mux := http.NewServeMux()
+	a.registerHandlers(mux)
 
 	a.server = &http.Server{
 		Handler: mux,
@@ -208,6 +218,7 @@ func (a *adminServer) handleServiceLogsWS(ws *websocket.Conn) {
 	parts := strings.Split(strings.TrimPrefix(ws.Request().URL.Path, "/ws/service/"), "/")
 	if len(parts) < 2 || parts[1] != "logs" {
 		_ = websocket.Message.Send(ws, "invalid path")
+		ws.Close() // Ensure connection is closed after error
 		if a.verbose {
 			log.Printf("admin", "Invalid WebSocket logs path: %s", ws.Request().URL.Path)
 		}
@@ -217,6 +228,7 @@ func (a *adminServer) handleServiceLogsWS(ws *websocket.Conn) {
 	svc, ok := a.sup.GetService(name)
 	if !ok {
 		_ = websocket.Message.Send(ws, "service not found")
+		ws.Close() // Ensure connection is closed after error
 		if a.verbose {
 			log.Printf("admin", "WebSocket logs: service %s not found", name)
 		}
