@@ -108,9 +108,11 @@ services:
 - `/services`: List all services and their status
 - `/service/{name}`: Get status for a specific service
 - `/service/{name}/start|stop|restart`: Control a service
+- `/service/{name}/processes`: List all processes under a specific service
 - `/ws/service/{name}/logs`: Stream logs for a service (all processes)
 
 ### Process-level Endpoints
+- `/processes`: List all processes across all services
 - `/process/{id}`: Get status and resource usage for a specific process (by unique process ID)
 - `/ws/process/{id}/logs`: Stream logs for a specific process
 
@@ -153,6 +155,40 @@ Response:
   "memory_rss": 23456789,
   "memory_percent": 0.3
 }
+```
+
+#### Example: List all processes
+```sh
+curl http://localhost:8080/processes
+```
+Response:
+```json
+[
+  {
+    "id": "abc123",
+    "pid": 12345,
+    "service": "nginx",
+    "running": true,
+    "resource": { "cpu_percent": 0.5, "memory_rss": 12345678, "memory_percent": 0.1 }
+  },
+  // ...
+]
+```
+
+#### Example: List processes under a service
+```sh
+curl http://localhost:8080/service/nginx/processes
+```
+Response:
+```json
+[
+  {
+    "id": "abc123",
+    "pid": 12345,
+    "running": true,
+    "resource": { "cpu_percent": 0.5, "memory_rss": 12345678, "memory_percent": 0.1 }
+  }
+]
 ```
 
 ### TypeScript API Types

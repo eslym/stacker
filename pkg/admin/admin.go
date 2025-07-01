@@ -52,6 +52,7 @@ func (a *adminServer) registerHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/services", a.handleServices)
 	mux.HandleFunc("/service/", a.handleService)
 	mux.HandleFunc("/process/", a.handleProcess) // New: process-level API
+	mux.HandleFunc("/processes", a.handleProcesses) // New: list all processes
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if a.verbose {
 			log.Printf("admin", "healthz endpoint hit from %s", r.RemoteAddr)
@@ -225,6 +226,24 @@ func (a *adminServer) handleService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Add process listing endpoint: /service/{name}/processes
+	if len(parts) == 2 && parts[1] == "processes" && r.Method == http.MethodGet {
+		procs := []map[string]any{}
+		for _, proc := range svc.ListProcesses() {
+			info := map[string]any{
+				"id":      proc.GetID(),
+				"pid":     proc.GetPid(),
+				"running": proc.IsRunning(),
+			}
+			if res, err := proc.GetResourceStats(); err == nil {
+				info["resource"] = res
+			}
+			procs = append(procs, info)
+		}
+		writeJSON(w, procs)
+		return
+	}
+
 	http.Error(w, "invalid request", http.StatusBadRequest)
 	if a.verbose {
 		log.Printf("admin", "Invalid request to /service/%s from %s", name, r.RemoteAddr)
@@ -259,6 +278,26 @@ func (a *adminServer) handleProcess(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	http.Error(w, "process not found", http.StatusNotFound)
+}
+
+// handleProcesses returns all processes across all services
+func (a *adminServer) handleProcesses(w http.ResponseWriter, r *http.Request) {
+	processes := []map[string]any{}
+	for _, svc := range a.sup.GetAllServices() {
+		for _, proc := range svc.ListProcesses() {
+			info := map[string]any{
+				"id":      proc.GetID(),
+				"pid":     proc.GetPid(),
+				"service": svc.GetName(),
+				"running": proc.IsRunning(),
+			}
+			if res, err := proc.GetResourceStats(); err == nil {
+				info["resource"] = res
+			}
+			processes = append(processes, info)
+		}
+	}
+	writeJSON(w, processes)
 }
 
 // handleServiceLogsWS streams live logs for a service over WebSocket
