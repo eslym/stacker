@@ -280,7 +280,7 @@ func deserializeRestartPolicy(config *Config, data any, envMapping func(string) 
 					return nil, fmt.Errorf("expected 'infinity' or number for 'maxRetries', got %q", maxRetries)
 				}
 				policy.MaxRetries = -1
-			case int64:
+			case int:
 				if maxRetries <= 0 {
 					return nil, fmt.Errorf("negative or zero value for 'maxRetries' is not allowed: %d", maxRetries)
 				}
@@ -343,7 +343,7 @@ func deserializeAdminEntry(data any, envMapping func(string) string) (*AdminEntr
 		}
 		if port, ok := data["port"]; ok {
 			switch val := port.(type) {
-			case int64:
+			case int:
 				if val <= 0 || val > 65535 {
 					return nil, fmt.Errorf("invalid port number %d, must be between 1 and 65535", val)
 				}
@@ -384,7 +384,7 @@ func parseDuration(value any, envMapping func(string) string, allowInfinity bool
 			return 0, fmt.Errorf("negative duration value %f is not allowed", v)
 		}
 		return time.Duration(v * float64(time.Second)), nil
-	case int64:
+	case int:
 		if v <= 0 {
 			return 0, fmt.Errorf("negative duration value %d is not allowed", v)
 		}
