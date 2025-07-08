@@ -35,7 +35,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: binary-${{ github.sha }}
-          path: bin
+          path: build
 
       - name: Upload Release Asset (amd64)
         uses: softprops/action-gh-release@v2
@@ -64,7 +64,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: binary-${{ github.sha }}
-          path: bin
+          path: build
 
       - name: Docker meta
         id: meta
