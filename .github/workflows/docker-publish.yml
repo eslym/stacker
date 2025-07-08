@@ -65,6 +65,9 @@ jobs:
         with:
           name: binary-${{ github.sha }}
           path: build
+        
+      - name: Fix Permissions
+        run: chmod +x build/*
 
       - name: Docker meta
         id: meta
