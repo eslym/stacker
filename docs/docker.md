@@ -3,10 +3,11 @@
 Stacker provides official Docker images for easy deployment in containerized environments. This guide covers image tags, usage patterns, and best practices.
 
 ## Available Images
-- `eslym/stacker:latest` (Debian-based, recommended)
-- `eslym/stacker:alpine` (Alpine-based, minimal)
-- Versioned tags: `eslym/stacker:x.y.z`, `eslym/stacker:x.y.z-alpine`, etc.
+- `eslym/stacker:latest` (Alpine-based, minimal, recommended)
+- Versioned tags: `eslym/stacker:x.y.z`
 - Multi-arch: Supports amd64 and arm64
+
+> **Note:** The image is built with a fully static Go binary and runs on any Linux distribution. There is no longer a separate Debian or Alpine variant.
 
 ## Basic Usage
 ```bash
