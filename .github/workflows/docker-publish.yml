@@ -25,8 +25,8 @@ jobs:
         run: |
           ./build.sh
           mkdir -p archive
-          tar --transform 's|build/stacker-amd64|stacker|' -czf archive/stacker-amd64.tar.gz stacker-amd64
-          tar --transform 's|build/stacker-arm64|stacker|' -czf archive/stacker-arm64.tar.gz stacker-arm64
+          tar --transform 's|build/stacker-amd64|stacker|' -czf archive/stacker-amd64.tar.gz build/stacker-amd64
+          tar --transform 's|build/stacker-arm64|stacker|' -czf archive/stacker-arm64.tar.gz build/stacker-arm64
 
       - name: Upload Binary
         uses: actions/upload-artifact@v4
