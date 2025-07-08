@@ -3,10 +3,13 @@ name: Docker Build, Extract Binary, and Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 env:
   REGISTRY_IMAGE: eslym/stacker
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -19,7 +22,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: "1.24"
 
       - name: Build Binary
         run: |
@@ -52,7 +55,7 @@ jobs:
     needs: build
     strategy:
       matrix:
-        arch: [ amd64, arm64 ]
+        arch: [amd64, arm64]
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
