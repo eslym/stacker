@@ -60,6 +60,12 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Download Binary
+        uses: actions/download-artifact@v4
+        with:
+          name: binary-${{ github.sha }}
+          path: bin
+
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@v5
