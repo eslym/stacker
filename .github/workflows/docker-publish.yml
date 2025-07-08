@@ -5,26 +5,72 @@ on:
     tags:
       - 'v*'
 
+env:
+  REGISTRY_IMAGE: eslym/stacker
+
 jobs:
-  docker:
-    name: Build, Extract Binary, and Release
+  build:
+    name: Build Binaries and Release
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build Binary
+        run: |
+          ./build.sh
+          mkdir -p archive
+          tar --transform 's|build/stacker-amd64|stacker|' -czf archive/stacker-amd64.tar.gz stacker-amd64
+          tar --transform 's|build/stacker-arm64|stacker|' -czf archive/stacker-arm64.tar.gz stacker-arm64
+
+      - name: Upload Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ github.sha }}
+          path: bin
+
+      - name: Upload Release Asset (amd64)
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: archive/stacker-amd64.tar.gz
+
+      - name: Upload Release Asset (arm64)
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: archive/stacker-arm64.tar.gz
+
+  docker:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    needs: build
     strategy:
       matrix:
-        distro: [debian, alpine]
-        include:
-          - distro: debian
-            is_default: true
-            type: glibc
-          - distro: alpine
-            is_default: false
-            type: musl
-
+        arch: [ amd64, arm64 ]
     steps:
-      - name: Checkout code
+      - name: Checkout Code
         uses: actions/checkout@v4
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY_IMAGE }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -32,118 +78,66 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ env.REGISTRY_IMAGE }}
+          outputs: type=image,push-by-digest=true,name-canonical=true,push=true
+          build-args: GOARCH=${{ matrix.arch }}
+
+      - name: Export digest
+        run: |
+          mkdir -p ${{ runner.temp }}/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ github.sha }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  manifest:
+    name: Create Manifest
+    runs-on: ubuntu-latest
+    needs: docker
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-${{ github.sha }}-*
+          merge-multiple: true
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v2
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Prepare tags
-        id: tags
-        run: |
-          TAGS=""
-          # Add distribution-specific tags
-          TAGS+="type=semver,pattern={{version}}-${{ matrix.distro }}\n"
-          TAGS+="type=semver,pattern={{major}}.{{minor}}-${{ matrix.distro }}\n"
-          TAGS+="type=semver,pattern={{major}}-${{ matrix.distro }}\n"
-          TAGS+="${{ matrix.distro }}\n"
-          TAGS+="latest-${{ matrix.distro }}\n"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-          # Add default tags (without distribution suffix) only for the default distribution
-          if [ "${{ matrix.is_default }}" = "true" ]; then
-            TAGS+="type=semver,pattern={{version}}\n"
-            TAGS+="type=semver,pattern={{major}}.{{minor}}\n"
-            TAGS+="type=semver,pattern={{major}}\n"
-            TAGS+="latest\n"
-          fi
-
-          # Output tags using correct multi-line syntax
-          {
-            echo "tags<<EOF"
-            echo -e "$TAGS"
-            echo "EOF"
-          } >> $GITHUB_OUTPUT
-
-      - name: Extract metadata
+      - name: Docker Meta
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: eslym/stacker
-          tags: ${{ steps.tags.outputs.tags }}
+          images: ${{ env.REGISTRY_IMAGE }}
+          flavor: |
+            latest=true
+          tags: |
+            type=semver,pattern={{major}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{version}}
 
-      # Build and push image for both x64 and arm64
-      - name: Build and push ${{ matrix.distro }} image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          build-args: |
-            DISTRO=${{ matrix.distro }}
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-
-      # Set image tag variable for extraction steps
-      - name: Set image tag variable
-        id: set_tag
+      - name: Create manifest list and push
+        working-directory: ${{ runner.temp }}/digests
         run: |
-          echo "tag=$(echo '${{ steps.meta.outputs.tags }}' | head -n1)" >> $GITHUB_OUTPUT
-
-      # Extract binary from built image
-      - name: Create container from image
-        run: |
-          docker create --name extract_container ${{ steps.set_tag.outputs.tag }}
-
-      - name: Copy binary from container
-        run: |
-          docker cp extract_container:/usr/local/bin/stacker ./stacker-${{ matrix.type }}
-
-      - name: Remove container
-        run: |
-          docker rm extract_container
-
-      # Extract amd64 binary from built image
-      - name: Create amd64 container from image
-        run: |
-          docker create --platform linux/amd64 --name extract_container_amd64 ${{ steps.set_tag.outputs.tag }}
-
-      - name: Copy amd64 binary from container
-        run: |
-          docker cp extract_container_amd64:/usr/local/bin/stacker ./stacker-${{ matrix.type }}-amd64
-
-      - name: Remove amd64 container
-        run: |
-          docker rm extract_container_amd64
-
-      # Extract arm64 binary from built image
-      - name: Create arm64 container from image
-        run: |
-          docker create --platform linux/arm64 --name extract_container_arm64 ${{ steps.set_tag.outputs.tag }}
-
-      - name: Copy arm64 binary from container
-        run: |
-          docker cp extract_container_arm64:/usr/local/bin/stacker ./stacker-${{ matrix.type }}-arm64
-
-      - name: Remove arm64 container
-        run: |
-          docker rm extract_container_arm64
-
-      - name: Archive amd64 binary
-        run: |
-          tar czvf stacker-${{ matrix.type }}-amd64.tar.gz stacker-${{ matrix.type }}-amd64
-
-      - name: Archive arm64 binary
-        run: |
-          tar czvf stacker-${{ matrix.type }}-arm64.tar.gz stacker-${{ matrix.type }}-arm64
-
-      - name: Upload Release Asset (amd64)
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: stacker-${{ matrix.type }}-amd64.tar.gz
-
-      - name: Upload Release Asset (arm64)
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: stacker-${{ matrix.type }}-arm64.tar.gz
+          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY_IMAGE }}@sha256:%s ' *)
