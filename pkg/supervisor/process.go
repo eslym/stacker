@@ -236,12 +236,11 @@ func (sp *supervisedProcess) Stop(timeout time.Duration) error {
 		sp.mu.Unlock()
 		return fmt.Errorf("%w", ErrProcessNotRunning)
 	}
-	proc := sp.cmd.Process
 	done := sp.done
 	sp.mu.Unlock()
 
 	// Try to send interrupt, fallback to kill if not supported
-	err := proc.Signal(os.Interrupt)
+	err := sp.psutil.Terminate()
 	if err != nil {
 		return err
 	}
@@ -262,7 +261,6 @@ func (sp *supervisedProcess) Kill() error {
 		sp.mu.Unlock()
 		return fmt.Errorf("%w", ErrProcessNotRunning)
 	}
-	proc := sp.cmd.Process
 	done := sp.done
 	sp.mu.Unlock()
 
@@ -270,7 +268,7 @@ func (sp *supervisedProcess) Kill() error {
 		sp.cancel() // cancel context to cleanup goroutines
 	}
 
-	err := proc.Kill()
+	err := sp.psutil.Kill()
 	<-done
 	sp.postCleanup()
 	return err
